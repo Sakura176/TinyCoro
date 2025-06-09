@@ -1,0 +1,1 @@
+valgrind --tool=memcheck --xml=yes --xml-file=$1 --gen-suppressions=all --leak-check=full --leak-resolution=med --track-origins=yes --vgdb=no $2
