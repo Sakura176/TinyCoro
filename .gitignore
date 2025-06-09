@@ -34,6 +34,7 @@
 .idea
 .cache
 logs
+out
 build
 build_debug
 build_release
