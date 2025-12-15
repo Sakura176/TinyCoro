@@ -12,7 +12,6 @@
 
 #include <cassert>
 #include <coroutine>
-#include <stdexcept>
 #include <utility>
 
 #include "coro/attribute.hpp"
@@ -74,6 +73,7 @@ struct promise_base
         // TODO[lab1]: Add you codes
         // Return suspend_always is incorrect,
         // so you should modify the return type and define new awaiter to return
+        log::debug("promise_base final_suspend");
         return awaiter_base{};
     }
 

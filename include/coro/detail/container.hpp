@@ -1,6 +1,7 @@
 #pragma once
 
 #include <exception>
+#include <stdexcept>
 #include <variant>
 
 #include "coro/concepts/common.hpp"

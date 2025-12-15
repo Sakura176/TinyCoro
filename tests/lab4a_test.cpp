@@ -52,6 +52,7 @@ task<> set_func(event<>& ev, std::atomic<int>& id, int* p)
     auto guard = event_guard(ev);
     utils::msleep(100);
     *p = id.fetch_add(1, std::memory_order_acq_rel) + 1;
+    // log::info("inline set_func completed, id={}", id.load());
     co_return;
 }
 
@@ -59,6 +60,7 @@ task<> wait_func(event<>& ev, std::atomic<int>& id, int* p)
 {
     co_await ev.wait();
     *p = id.fetch_add(1, std::memory_order_acq_rel) + 1;
+    // log::info("inline wait_func completed, id={}", id.load());
 }
 
 task<> set_value_func(event<int>& ev, int value)

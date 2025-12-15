@@ -9,10 +9,13 @@
  *
  */
 #pragma once
+#include <algorithm>
 #include <atomic>
 #include <coroutine>
+#include <vector>
 
 #include "coro/attribute.hpp"
+#include "coro/comp/when_all.hpp"
 #include "coro/concepts/awaitable.hpp"
 #include "coro/context.hpp"
 #include "coro/detail/container.hpp"
@@ -46,29 +49,116 @@ namespace detail
 // You should delete it and add your implementation, I don't care what you do,
 // but keep the function set() and wait()'s declaration same with example.
 template<typename return_type = void>
-class event
+class event : public detail::container<return_type>
 {
     // Just make compile success
-    struct awaiter : detail::noop_awaiter
+    struct awaiter
     {
+        awaiter(context& ctx, event& ev) : m_ctx(ctx), m_ev(ev) {}
+        auto await_ready() -> bool
+        {
+            m_ctx.register_wait();
+            return m_ev.is_set();
+        }
+        auto await_suspend(std::coroutine_handle<> handle) -> bool { return false; }
         auto await_resume() -> return_type { return {}; }
+
+        context& m_ctx;
+        event&   m_ev;
     };
 
+    void set_state() noexcept { auto flag = m_state.exchange(this, std::memory_order_acquire); }
+
 public:
-    auto wait() noexcept -> awaiter { return {}; } // return awaitable
+    auto wait() noexcept -> awaiter { return awaiter{local_context(), *this}; } // return awaitable
 
     template<typename value_type>
     auto set(value_type&& value) noexcept -> void
     {
+        this->return_value(std::forward<value_type>(value));
+        set_state();
     }
+
+    inline auto is_set() const noexcept -> bool { return m_state.load(std::memory_order_acquire) == this; }
+
+private:
+    std::atomic<detail::awaiter_ptr> m_state{nullptr};
 };
 
 template<>
 class event<>
 {
+    struct awaiter
+    {
+        awaiter(context& ctx, event& ev) : m_ctx(ctx), m_ev(ev) {}
+        auto await_ready() -> bool
+        {
+            m_ctx.register_wait();
+            return m_ev.is_set();
+        }
+        auto await_suspend(std::coroutine_handle<> handle) -> bool
+        {
+            m_await_coro = handle;
+            return m_ev.register_awaiter(this);
+        }
+        auto await_resume() -> void
+        {
+            m_ctx.unregister_wait();
+        }
+
+        context&                m_ctx;
+        event&                  m_ev;
+        awaiter*                m_next{nullptr};
+        std::coroutine_handle<> m_await_coro{nullptr};
+    };
+
+    void set_state() noexcept
+    {
+        auto flag = m_state.exchange(this, std::memory_order_acq_rel);
+        if (flag != this)
+        {
+            auto waiter = static_cast<awaiter*>(flag);
+            resume_all_awaiter(waiter);
+        }
+    }
+
 public:
-    auto wait() noexcept -> detail::noop_awaiter { return {}; } // return awaitable
-    auto set() noexcept -> void {}
+    auto        wait() noexcept -> awaiter { return awaiter{local_context(), *this}; } // return awaitable
+    auto        set() noexcept -> void { set_state(); }
+    inline auto is_set() const noexcept -> bool { return m_state.load(std::memory_order_acquire) == this; }
+
+    auto resume_all_awaiter(detail::awaiter_ptr waiter) noexcept -> void
+    {
+        while (waiter != nullptr)
+        {
+            auto cur = static_cast<awaiter*>(waiter);
+            cur->m_ctx.submit_task(cur->m_await_coro);
+            waiter = cur->m_next;
+        }
+    }
+
+    auto register_awaiter(awaiter* waiter) noexcept -> bool
+    {
+        const auto          set_state = this;
+        detail::awaiter_ptr old_value = nullptr;
+
+        do
+        {
+            old_value = m_state.load(std::memory_order_acquire);
+            if (old_value == this)
+            {
+                waiter->m_next = nullptr;
+                return false;
+            }
+            waiter->m_next = static_cast<awaiter*>(old_value);
+        } while (
+            !m_state.compare_exchange_weak(old_value, waiter, std::memory_order_acquire));
+
+        return true; // 成功注册，需要挂起协程
+    }
+
+private:
+    std::atomic<detail::awaiter_ptr> m_state{nullptr};
 };
 
 /**
@@ -81,7 +171,11 @@ class event_guard
 
 public:
     event_guard(guard_type& ev) noexcept : m_ev(ev) {}
-    ~event_guard() noexcept { m_ev.set(); }
+    ~event_guard() noexcept
+    {
+        m_ev.set();
+        log::debug("event_guard::~event_guard");
+    }
 
 private:
     guard_type& m_ev;

@@ -1,13 +1,3 @@
-/**
- * @file context.hpp
- * @author JiahuiWang
- * @brief lab2b
- * @version 1.0
- * @date 2025-03-26
- *
- * @copyright Copyright (c) 2025
- *
- */
 #pragma once
 
 #include <atomic>
@@ -140,10 +130,10 @@ public:
     auto empty_wait_task() noexcept -> bool { return m_register_count.load() == 0 && m_engine.empty_io(); }
 
 private:
-    CORO_ALIGN engine   m_engine;
-    unique_ptr<jthread> m_job;
-    ctx_id              m_id;
-    std::atomic<int>    m_register_count;
+    CORO_ALIGN engine   m_engine;         // 协程调度引擎（内存对齐）
+    unique_ptr<jthread> m_job;            // 工作线程
+    ctx_id              m_id;             // 上下文唯一ID
+    std::atomic<int>    m_register_count; // 等待任务计数器
     // TODO[lab2b]: Add more member variables if you need
 };
 

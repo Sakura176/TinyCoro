@@ -36,8 +36,10 @@ auto context::start() noexcept -> void
 auto context::notify_stop() noexcept -> void
 {
     // TODO[lab2b]: Add you codes
+    log::debug("begin context::notify_stop");
     m_job->request_stop();
     m_engine.wake_up();
+    log::debug("end context::notify_stop");
 }
 
 auto context::submit_task(std::coroutine_handle<> handle) noexcept -> void

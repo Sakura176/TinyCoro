@@ -36,6 +36,7 @@ auto scheduler::loop_impl(bool long_run_mode) noexcept -> void
 
 auto scheduler::stop_impl() noexcept -> void
 {
+    log::debug("begin stop_impl m_ctx_cnt: {}", m_ctx_cnt);
     for (int i = 0; i < m_ctx_cnt; i++)
     {
         m_ctxs[i]->notify_stop();
@@ -43,8 +44,11 @@ auto scheduler::stop_impl() noexcept -> void
 
     for (int i = 0; i < m_ctx_cnt; i++)
     {
+        log::debug("begin context::join");
         m_ctxs[i]->join();
+        log::debug("end context::join");
     }
+    log::debug("end stop_impl m_ctx_cnt: {}", m_ctx_cnt);
 }
 
 auto scheduler::join_impl() noexcept -> void
