@@ -45,6 +45,49 @@ namespace detail
 // TODO[lab4a]: Add code that you don't want to use externally in namespace detail
 }; // namespace detail
 
+class event_base
+{
+public:
+    struct awaiter_base
+    {
+        awaiter_base(context& ctx, event_base& ev) : m_ctx(ctx), m_ev(ev) {}
+        auto await_ready() -> bool
+        {
+            m_ctx.register_wait();
+            return m_ev.is_set();
+        }
+        auto await_suspend(std::coroutine_handle<> handle) -> bool
+        {
+            m_await_coro = handle;
+            return m_ev.register_awaiter(this);
+        }
+        auto await_resume() -> void { m_ctx.unregister_wait(); }
+
+        context&                m_ctx;
+        event_base&             m_ev;
+        awaiter_base*           m_next{nullptr};
+        std::coroutine_handle<> m_await_coro{nullptr};
+    };
+
+    void set_state() noexcept
+    {
+        auto flag = m_state.exchange(this, std::memory_order_acq_rel);
+        if (flag != this)
+        {
+            auto waiter = static_cast<awaiter_base*>(flag);
+            resume_all_awaiter(waiter);
+        }
+    }
+    auto is_set() const noexcept -> bool;
+
+    auto resume_all_awaiter(detail::awaiter_ptr waiter) noexcept -> void;
+
+    auto register_awaiter(awaiter_base* waiter) noexcept -> bool;
+
+private:
+    std::atomic<awaiter_ptr> m_state{nullptr};
+};
+
 // TODO[lab4a]: This event is an example to make complie success,
 // You should delete it and add your implementation, I don't care what you do,
 // but keep the function set() and wait()'s declaration same with example.
@@ -101,10 +144,7 @@ class event<>
             m_await_coro = handle;
             return m_ev.register_awaiter(this);
         }
-        auto await_resume() -> void
-        {
-            m_ctx.unregister_wait();
-        }
+        auto await_resume() -> void { m_ctx.unregister_wait(); }
 
         context&                m_ctx;
         event&                  m_ev;
@@ -151,8 +191,7 @@ public:
                 return false;
             }
             waiter->m_next = static_cast<awaiter*>(old_value);
-        } while (
-            !m_state.compare_exchange_weak(old_value, waiter, std::memory_order_acquire));
+        } while (!m_state.compare_exchange_weak(old_value, waiter, std::memory_order_acquire));
 
         return true; // 成功注册，需要挂起协程
     }
