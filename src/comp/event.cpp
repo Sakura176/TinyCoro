@@ -5,13 +5,12 @@
 
 namespace coro
 {
-// TODO[lab4a] : Add codes if you need
 namespace detail
 {
 auto event_base::awaiter_base::await_ready() noexcept -> bool
 {
     m_ctx.register_wait();
-    return m_ev.is_set();
+    return m_ev.is_set(); // 检查时间是否已设置，如已设置则无需挂起协程
 }
 
 auto event_base::awaiter_base::await_suspend(std::coroutine_handle<> handle) noexcept -> bool
@@ -22,6 +21,7 @@ auto event_base::awaiter_base::await_suspend(std::coroutine_handle<> handle) noe
 
 auto event_base::set_state() noexcept -> void
 {
+    // 将当前事件对象指针设置为新状态，同时返回旧状态值
     auto flag = m_state.exchange(this, std::memory_order_acq_rel);
     if (flag != this)
     {
@@ -58,7 +58,9 @@ auto event_base::register_awaiter(awaiter_base* waiter) noexcept -> bool
             waiter->m_next = nullptr;
             return false;
         }
+        // 新等待器插入链表头部
         waiter->m_next = static_cast<awaiter_base*>(old_value);
+        // CAS操作：比较m_state和old_value，如果相等则设置为waiter（新链表头）
     } while (!m_state.compare_exchange_weak(old_value, waiter, std::memory_order_acquire));
 
     return true; // 成功注册，需要挂起协程
