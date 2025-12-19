@@ -14,9 +14,9 @@
 #include <coroutine>
 #include <vector>
 
-#include "coro/attribute.hpp"
-#include "coro/comp/when_all.hpp"
-#include "coro/concepts/awaitable.hpp"
+// #include "coro/attribute.hpp"
+// #include "coro/comp/when_all.hpp"
+// #include "coro/concepts/awaitable.hpp"
 #include "coro/context.hpp"
 #include "coro/detail/container.hpp"
 #include "coro/detail/types.hpp"
@@ -107,6 +107,7 @@ private:
 template<>
 class event<void> : public detail::event_base
 {
+public:
     struct awaiter : public awaiter_base
     {
         using awaiter_base::awaiter_base;

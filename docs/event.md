@@ -31,22 +31,34 @@ graph TD
   + 在基类中未实现
   + 子类可重写实现自定义恢复逻辑
   + 通常用于处理返回值或清理资源
-2. 原子操作与内存顺序
+
+### 2. 原子操作与内存顺序
 事件系统使用原子操作确保线程安全：
 
-Cpp
+```Cpp
 m_state.exchange(this, std::memory_order_acq_rel)
-exchange操作：原子交换操作，返回旧值
+```
 
-内存顺序：
++ exchange操作：原子交换操作，返回旧值
 
-memory_order_acquire：保证后续读取能看到此操作前的写入
-memory_order_release：保证此操作前的写入对后续操作可见
-memory_order_acq_rel：同时包含acquire和release语义
-CAS循环：
++ 内存顺序：
 
-Cpp
+  + memory_order_acquire：保证后续读取能看到此操作前的写入
+  + memory_order_release：保证此操作前的写入对后续操作可见
+  + memory_order_acq_rel：同时包含acquire和release语义
++ CAS循环：
+
+```Cpp
   while (!compare_exchange_weak(old_value, new_value))
-无锁编程的核心模式
-确保多线程环境下安全更新状态
-weak版本允许虚假失败，但性能更好
+```
++ 无锁编程的核心模式
++ 确保多线程环境下安全更新状态
++ weak版本允许虚假失败，但性能更好
+
+### 3.等待器链表管理
+事件系统使用链表管理所有等待该事件的协程：
+```mermaid
+graph LR
+    A[新等待器] -->|m_next| B[旧链表头]
+    M[m_state] --> A
+```

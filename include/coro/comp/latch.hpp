@@ -1,18 +1,9 @@
-/**
- * @file latch.hpp
- * @author JiahuiWang
- * @brief lab4b
- * @version 1.0
- * @date 2025-03-24
- *
- * @copyright Copyright (c) 2025
- *
- */
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 
-#include "coro/detail/types.hpp"
+#include "coro/comp/event.hpp"
 
 namespace coro
 {
@@ -35,18 +26,37 @@ namespace coro
 // TODO[lab4b]: This latch is an example to make complie success,
 // You should delete it and add your implementation, I don't care what you do,
 // but keep the function count_down() and wait()'s declaration same with example.
+
+/**
+ * @breif 倒计数器同步原语，归0时唤醒所有等待的协程
+ * */
 class latch
 {
 public:
-    latch(std::uint64_t count) noexcept {}
+    using event_t = event<>;
+    latch(std::uint64_t count) noexcept : m_count(count) {}
     latch(const latch&)                    = delete;
     latch(latch&&)                         = delete;
     auto operator=(const latch&) -> latch& = delete;
     auto operator=(latch&&) -> latch&      = delete;
 
-    auto count_down() noexcept -> void {}
+    // 计数器减1，为0时恢复
+    auto count_down() noexcept -> void
+    {
+        // 计数减1并获取旧值，判断是否需要恢复
+        if (m_count.fetch_sub(1, std::memory_order_acq_rel) <= 1)
+        {
+            // resume所有awaiter
+            m_ev.set();
+        }
+    }
 
-    auto wait() noexcept -> detail::noop_awaiter { return {}; }
+    // 计数器大于0则挂起
+    auto wait() noexcept -> event_t::awaiter { return m_ev.wait(); }
+
+private:
+    std::atomic<uint64_t> m_count;
+    event_t               m_ev;
 };
 
 /**
