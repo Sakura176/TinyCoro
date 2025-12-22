@@ -14,9 +14,6 @@
 #include <coroutine>
 #include <vector>
 
-// #include "coro/attribute.hpp"
-// #include "coro/comp/when_all.hpp"
-// #include "coro/concepts/awaitable.hpp"
 #include "coro/context.hpp"
 #include "coro/detail/container.hpp"
 #include "coro/detail/types.hpp"
@@ -60,6 +57,14 @@ public:
         std::coroutine_handle<> m_await_coro{nullptr};
     };
 
+    event_base(bool inital_set = false) noexcept : m_state(inital_set ? this : nullptr) {}
+    ~event_base() noexcept = default;
+
+    event_base(const event_base&)            = delete;
+    event_base(event_base&&)                 = delete;
+    event_base& operator=(const event_base&) = delete;
+    event_base& operator=(event_base&&)      = delete;
+
     void set_state() noexcept;
 
     auto is_set() const noexcept -> bool;
@@ -79,7 +84,8 @@ private:
 template<typename return_type = void>
 class event : public detail::event_base, public detail::container<return_type>
 {
-    // Just make compile success
+public:
+    using detail::event_base::event_base;
     struct awaiter : public awaiter_base
     {
         using awaiter_base::awaiter_base;
@@ -90,7 +96,6 @@ class event : public detail::event_base, public detail::container<return_type>
         }
     };
 
-public:
     auto wait() noexcept -> awaiter { return awaiter{local_context(), *this}; } // return awaitable
 
     template<typename value_type>
@@ -99,15 +104,13 @@ public:
         this->return_value(std::forward<value_type>(value));
         set_state();
     }
-
-private:
-    std::atomic<detail::awaiter_ptr> m_state{nullptr};
 };
 
 template<>
 class event<void> : public detail::event_base
 {
 public:
+    using detail::event_base::event_base;
     struct awaiter : public awaiter_base
     {
         using awaiter_base::awaiter_base;

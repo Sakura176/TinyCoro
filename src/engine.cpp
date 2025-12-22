@@ -1,6 +1,5 @@
 #include "coro/engine.hpp"
 #include "config.h"
-#include "coro/log.hpp"
 #include "coro/meta_info.hpp"
 #include "coro/net/io_info.hpp"
 #include "coro/task.hpp"
@@ -9,11 +8,8 @@
 
 namespace coro::detail
 {
-using std::memory_order_relaxed;
-
 auto engine::init() noexcept -> void
 {
-    // TODO[lab2a]: Add you codes
     linfo.egn              = this;
     m_running_io_count     = 0;
     m_wait_submit_io_count = 0;

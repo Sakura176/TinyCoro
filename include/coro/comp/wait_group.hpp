@@ -13,6 +13,7 @@
 #include <atomic>
 #include <coroutine>
 
+#include "coro/comp/event.hpp"
 #include "coro/detail/types.hpp"
 
 namespace coro
@@ -41,13 +42,24 @@ class context;
 class wait_group
 {
 public:
-    explicit wait_group(int count = 0) noexcept {}
+    using event_t = event<>;
+    explicit wait_group(uint64_t count = 0) noexcept : m_count(count) {}
 
-    auto add(int count) noexcept -> void {};
+    auto add(int count) noexcept -> void { m_count.fetch_add(count, std::memory_order_acquire); };
 
-    auto done() noexcept -> void {};
+    auto done() noexcept -> void
+    {
+        if (m_count.fetch_sub(1, std::memory_order_acq_rel) <= 1)
+        {
+            m_ev.set();
+        }
+    };
 
-    auto wait() noexcept -> detail::noop_awaiter { return {}; };
+    auto wait() noexcept -> event_t::awaiter { return m_ev.wait(); };
+
+private:
+    std::atomic<uint64_t> m_count;
+    event_t               m_ev;
 };
 
 }; // namespace coro
