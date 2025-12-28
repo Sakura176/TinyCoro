@@ -1,6 +1,5 @@
 #include "coro/comp/event.hpp"
 #include "coro/detail/types.hpp"
-#include "coro/scheduler.hpp"
 #include <coroutine>
 
 namespace coro
