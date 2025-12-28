@@ -1,5 +1,6 @@
 #include "coro/comp/event.hpp"
 #include "coro/detail/types.hpp"
+#include "coro/log.hpp"
 #include "coro/scheduler.hpp"
 #include <coroutine>
 
@@ -37,11 +38,26 @@ auto event_base::is_set() const noexcept -> bool
 
 auto event_base::resume_all_awaiter(detail::awaiter_ptr waiter) noexcept -> void
 {
+    int count = 0;
+
     while (waiter != nullptr)
     {
         auto cur = static_cast<awaiter_base*>(waiter);
+
+        if (!cur->m_await_coro || cur->m_await_coro.done())
+        {
+            waiter = cur->m_next;
+            continue;
+        }
+
+        // 保存下一个节点的指针
+        auto next = cur->m_next;
+        // 提交协程任务，会导致下一个节点失效
         cur->m_ctx.submit_task(cur->m_await_coro);
-        waiter = cur->m_next;
+        count++;
+        waiter = next;
+
+        log::debug("resume_all_awaiter:resume {} awaiters", count);
     }
 }
 
