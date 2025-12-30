@@ -1,13 +1,3 @@
-/**
- * @file mutex.hpp
- * @author JiahuiWang
- * @brief lab4d
- * @version 1.0
- * @date 2025-03-24
- *
- * @copyright Copyright (c) 2025
- *
- */
 #pragma once
 
 #include <atomic>
@@ -16,6 +6,7 @@
 #include <type_traits>
 
 #include "coro/comp/mutex_guard.hpp"
+#include "coro/context.hpp"
 #include "coro/detail/types.hpp"
 
 namespace coro
@@ -43,6 +34,21 @@ class context;
 // but keep the member function and construct function's declaration same with example.
 class mutex
 {
+    struct mutex_awaiter
+    {
+        mutex_awaiter(context& ctx, mutex& mtx) noexcept : m_ctx(ctx), m_mtx(mtx) {}
+
+        auto await_ready() noexcept -> bool;
+        auto await_suspend(std::coroutine_handle<> handle) noexcept -> bool;
+        auto await_resume() noexcept -> void;
+
+        auto resume() noexcept -> void { m_ctx.submit_task(m_await_coro); }
+
+        context&                m_ctx;
+        mutex&                  m_mtx;
+        mutex_awaiter*          m_next{nullptr};
+        std::coroutine_handle<> m_await_coro;
+    };
     // Just make lock_guard() compile success
     struct guard_awaiter : detail::noop_awaiter
     {
@@ -55,13 +61,21 @@ public:
     mutex() noexcept {}
     ~mutex() noexcept {}
 
-    auto try_lock() noexcept -> bool { return {}; }
+    auto try_lock() noexcept -> bool;
+    auto lock() noexcept -> mutex_awaiter;
 
-    auto lock() noexcept -> detail::noop_awaiter { return {}; };
+    auto unlock() noexcept -> void;
 
-    auto unlock() noexcept -> void {};
+    auto lock_guard() noexcept -> guard_awaiter;
 
-    auto lock_guard() noexcept -> guard_awaiter { return {*this}; };
+private:
+    bool try_lock_impl() noexcept;
+    bool enqueue_waiter(mutex_awaiter* waiter) noexcept;
+    void dequeue_and_resume_one() noexcept;
+
+private:
+    std::atomic<bool>           m_locked{false}; // 互斥锁状态记录
+    std::atomic<mutex_awaiter*> m_waiters{nullptr};
 };
 
 }; // namespace coro
