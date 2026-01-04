@@ -1,5 +1,6 @@
 #include "coro/comp/mutex.hpp"
 #include "coro/context.hpp"
+#include "coro/log.hpp"
 #include "coro/scheduler.hpp"
 #include <atomic>
 #include <cassert>
@@ -10,16 +11,19 @@ namespace coro
 // 直接挂起协程
 auto mutex::mutex_awaiter::await_ready() noexcept -> bool
 {
+    log::info("await_ready");
     return m_mtx.try_lock_impl();
 }
 auto mutex::mutex_awaiter::await_suspend(std::coroutine_handle<> handle) noexcept -> bool
 {
+    log::info("await_suspend");
     m_await_coro = handle;
     m_ctx.register_wait();
     return m_mtx.enqueue_waiter(this);
 }
 auto mutex::mutex_awaiter::await_resume() noexcept -> void
 {
+    log::info("await_resume");
     m_ctx.unregister_wait();
 }
 
@@ -46,7 +50,7 @@ auto mutex::unlock() noexcept -> void
 
 auto mutex::lock_guard() noexcept -> guard_awaiter
 {
-    return {*this};
+    return guard_awaiter(local_context(), *this);
 }
 
 bool mutex::try_lock_impl() noexcept

@@ -50,11 +50,16 @@ class mutex
         std::coroutine_handle<> m_await_coro;
     };
     // Just make lock_guard() compile success
-    struct guard_awaiter : detail::noop_awaiter
+    struct guard_awaiter : public mutex_awaiter
     {
-        guard_awaiter(mutex& m) noexcept : mtx(m) {}
-        auto   await_resume() -> detail::lock_guard<mutex> { return detail::lock_guard<mutex>(mtx); }
-        mutex& mtx;
+        using guard_type = detail::lock_guard<mutex>;
+        using mutex_awaiter::mutex_awaiter;
+
+        auto await_resume() -> guard_type
+        {
+            mutex_awaiter::await_resume();
+            return guard_type(m_mtx);
+        }
     };
 
 public:
