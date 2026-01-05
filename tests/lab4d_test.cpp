@@ -81,11 +81,15 @@ task<> lock_func(mutex& mtx, std::vector<int>& vec, int& id)
 {
     log::info("lock_func begin");
     auto guard = co_await mtx.lock_guard();
+    // mtx.lock();
     log::info("after lock_guard");
     vec.push_back(id);
     log::info("after push_back");
     ++id;
+    // mtx.unlock();
     log::info("after ++id");
+
+    co_return;
 }
 
 task<> trylock_func(mutex& mtx, std::vector<int>& vec, int& id)

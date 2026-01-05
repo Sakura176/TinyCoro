@@ -12,7 +12,9 @@ namespace coro
 auto mutex::mutex_awaiter::await_ready() noexcept -> bool
 {
     log::info("await_ready");
-    return m_mtx.try_lock_impl();
+    auto ret = m_mtx.try_lock_impl();
+    log::info("try_lock_impl {}", ret);
+    return ret;
 }
 auto mutex::mutex_awaiter::await_suspend(std::coroutine_handle<> handle) noexcept -> bool
 {
@@ -61,10 +63,12 @@ bool mutex::try_lock_impl() noexcept
 
 bool mutex::enqueue_waiter(mutex_awaiter* waiter) noexcept
 {
+    log::info("enqueue_waiter");
     assert(waiter != nullptr);
 
     if (try_lock_impl())
     {
+        waiter->should_suspend.store(false, std::memory_order_release);
         return false;
     }
 
@@ -75,45 +79,28 @@ bool mutex::enqueue_waiter(mutex_awaiter* waiter) noexcept
         waiter->m_next = old_head;
     } while (!m_waiters.compare_exchange_weak(old_head, waiter, std::memory_order_release, std::memory_order_acquire));
 
-    if (try_lock_impl())
-    {
-        auto* current = m_waiters.load(std::memory_order_acquire);
-        if (current == waiter)
-        {
-            auto* next = waiter->m_next;
-            m_waiters.compare_exchange_strong(current, next, std::memory_order_release, std::memory_order_relaxed);
-            return false;
-        }
-    }
     return true;
 }
+
 void mutex::dequeue_and_resume_one() noexcept
 {
-    // NOTE: 判断锁情况
-    if (!try_lock_impl())
-    {
-        return;
-    }
+    log::info("dequeue_and_resume_one");
 
     mutex_awaiter* waiter = m_waiters.load(std::memory_order_acquire);
-    mutex_awaiter* next   = nullptr;
 
-    do
+    while (waiter != nullptr)
     {
-        if (waiter == nullptr)
+        auto* next = waiter->m_next;
+        if (m_waiters.compare_exchange_weak(waiter, next, std::memory_order_release, std::memory_order_acquire))
         {
-            m_locked.store(false, std::memory_order_release);
+            // 成功移除等待者，唤醒它
+            waiter->resume();
             return;
         }
-    } while (!m_waiters.compare_exchange_weak(waiter, next, std::memory_order_release, std::memory_order_acquire));
-
-    if (waiter != nullptr)
-    {
-        waiter->resume();
+        // CAS 失败，重新加载
+        waiter = m_waiters.load(std::memory_order_acquire);
     }
-    else
-    {
-        m_locked.store(false, std::memory_order_release);
-    }
+    // 没有等待者，直接释放锁
+    m_locked.store(false, std::memory_order_release);
 }
 }; // namespace coro

@@ -44,6 +44,7 @@ public:
      */
     inline static auto loop(bool long_run_mode = config::kLongRunMode) noexcept -> void
     {
+        log::debug("scheduler loop begin");
         get_instance()->loop_impl(long_run_mode);
     }
 

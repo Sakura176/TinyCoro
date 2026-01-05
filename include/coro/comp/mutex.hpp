@@ -47,6 +47,7 @@ class mutex
         context&                m_ctx;
         mutex&                  m_mtx;
         mutex_awaiter*          m_next{nullptr};
+        std::atomic<bool>       should_suspend{true};
         std::coroutine_handle<> m_await_coro;
     };
     // Just make lock_guard() compile success

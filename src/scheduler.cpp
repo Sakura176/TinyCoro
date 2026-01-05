@@ -24,6 +24,7 @@ auto scheduler::start_impl() noexcept -> void
 
 auto scheduler::loop_impl(bool long_run_mode) noexcept -> void
 {
+    log::debug("scheduler loop_impl begin");
     if (long_run_mode)
     {
         join_impl();
