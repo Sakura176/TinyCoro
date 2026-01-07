@@ -79,15 +79,15 @@ protected:
 
 task<> lock_func(mutex& mtx, std::vector<int>& vec, int& id)
 {
-    log::info("lock_func begin");
+    // log::info("lock_func begin");
     auto guard = co_await mtx.lock_guard();
     // mtx.lock();
-    log::info("after lock_guard");
+    // log::info("after lock_guard");
     vec.push_back(id);
-    log::info("after push_back");
+    // log::info("after push_back");
     ++id;
     // mtx.unlock();
-    log::info("after ++id");
+    // log::info("after ++id");
 
     co_return;
 }
@@ -164,11 +164,11 @@ TEST_P(MutexTest, MultiFetchLock)
 
     for (int i = 0; i < func_num; i++)
     {
-        log::info("before submit_to_scheduler");
+        // log::info("before submit_to_scheduler");
         submit_to_scheduler(lock_func(m_mtx, m_vec, m_id));
-        log::info("after submit_to_scheduler");
+        // log::info("after submit_to_scheduler");
     }
-    log::info("finish for");
+    // log::info("finish for");
     scheduler::start();
     scheduler::loop(false);
 
@@ -182,13 +182,17 @@ TEST_P(MutexTest, MultiFetchLock)
     }
 }
 
-INSTANTIATE_TEST_SUITE_P(MutexTests, MutexTest, ::testing::Values(std::make_tuple(1, 1)));
-// std::make_tuple(1, 100),
-// std::make_tuple(1, 10000),
-// std::make_tuple(0, 1),
-// std::make_tuple(0, 100),
-// std::make_tuple(0, 10000),
-// std::make_tuple(0, config::kMaxTestTaskNum)));
+INSTANTIATE_TEST_SUITE_P(
+    MutexTests,
+    MutexTest,
+    ::testing::Values(
+        std::make_tuple(1, 1),
+        std::make_tuple(1, 100),
+        std::make_tuple(1, 10000),
+        std::make_tuple(0, 1),
+        std::make_tuple(0, 100),
+        std::make_tuple(0, 10000),
+        std::make_tuple(0, config::kMaxTestTaskNum)));
 
 TEST_F(MutexTrylockTest, MultiTryLock)
 {

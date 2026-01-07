@@ -11,21 +11,19 @@ namespace coro
 // 直接挂起协程
 auto mutex::mutex_awaiter::await_ready() noexcept -> bool
 {
-    log::info("await_ready");
-    auto ret = m_mtx.try_lock_impl();
-    log::info("try_lock_impl {}", ret);
-    return ret;
+    // log::info("await_ready");
+    return false;
 }
 auto mutex::mutex_awaiter::await_suspend(std::coroutine_handle<> handle) noexcept -> bool
 {
-    log::info("await_suspend");
+    // log::info("await_suspend");
     m_await_coro = handle;
     m_ctx.register_wait();
     return m_mtx.enqueue_waiter(this);
 }
 auto mutex::mutex_awaiter::await_resume() noexcept -> void
 {
-    log::info("await_resume");
+    // log::info("await_resume");
     m_ctx.unregister_wait();
 }
 
@@ -63,7 +61,7 @@ bool mutex::try_lock_impl() noexcept
 
 bool mutex::enqueue_waiter(mutex_awaiter* waiter) noexcept
 {
-    log::info("enqueue_waiter");
+    // log::info("enqueue_waiter");
     assert(waiter != nullptr);
 
     if (try_lock_impl())
@@ -84,7 +82,7 @@ bool mutex::enqueue_waiter(mutex_awaiter* waiter) noexcept
 
 void mutex::dequeue_and_resume_one() noexcept
 {
-    log::info("dequeue_and_resume_one");
+    // log::info("dequeue_and_resume_one");
 
     mutex_awaiter* waiter = m_waiters.load(std::memory_order_acquire);
 
