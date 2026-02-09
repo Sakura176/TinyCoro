@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cassert>
 #include <coroutine>
+#include <cstdint>
 #include <type_traits>
 
 #include "coro/comp/mutex_guard.hpp"
@@ -75,13 +76,10 @@ public:
     auto lock_guard() noexcept -> guard_awaiter;
 
 private:
-    bool try_lock_impl() noexcept;
-    bool enqueue_waiter(mutex_awaiter* waiter) noexcept;
-    void dequeue_and_resume_one() noexcept;
+    bool register_waiter(mutex_awaiter* waiter) noexcept;
 
 private:
-    std::atomic<bool>           m_locked{false}; // 互斥锁状态记录
-    std::atomic<mutex_awaiter*> m_waiters{nullptr};
+    std::atomic<uintptr_t>           m_state{0}; // 0=空闲，1=锁定无等待，其他=等待队列头
 };
 
 }; // namespace coro
