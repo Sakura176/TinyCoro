@@ -47,6 +47,7 @@ auto mutex::unlock() noexcept -> void
     {
         if (old_state == 1)
         {
+            // 尝试直接获取锁
             if (m_state.compare_exchange_weak(old_state, 0, std::memory_order_release, std::memory_order_relaxed))
             {
                 return; // 成功释放
@@ -56,7 +57,7 @@ auto mutex::unlock() noexcept -> void
         { // 有等待者
             auto* waiter = reinterpret_cast<mutex_awaiter*>(old_state);
             auto* next   = waiter->m_next;
-
+            // 尝试将锁转移给下一个等待者
             if (m_state.compare_exchange_weak(
                     old_state, reinterpret_cast<uintptr_t>(next), std::memory_order_acq_rel, std::memory_order_relaxed))
             {
@@ -81,7 +82,7 @@ bool mutex::register_waiter(mutex_awaiter* waiter) noexcept
 
     while (true)
     {
-        if (old_state == 0)
+        if (old_state == 0) // nolocked
         {
             // 尝试直接获取锁
             if (m_state.compare_exchange_weak(old_state, 1, std::memory_order_acq_rel, std::memory_order_relaxed))
