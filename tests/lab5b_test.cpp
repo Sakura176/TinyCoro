@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "coro/coro.hpp"
+#include "coro/log.hpp"
 #include "gtest/gtest.h"
 
 using namespace coro;
@@ -87,7 +88,9 @@ task<> notify_one(ConditionVarNotifyOneTest::test_paras& para, int id, int loop_
 {
     while (loop_num > 0)
     {
+        log::info("id={} loop_num={}", id, loop_num);
         auto lock = co_await para.mtx.lock_guard();
+        log::info("lock acquired");
         co_await para.cv.wait(para.mtx, [&]() { return para.state == bool(id % 2); });
         para.state = !para.state;
         para.vec.push_back(id);

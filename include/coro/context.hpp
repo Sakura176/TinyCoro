@@ -105,7 +105,7 @@ public:
 
     /**
      * @brief add reference count of context
-     *
+     * 注册事件，增加注册事件的计数
      * @param register_cnt
      */
     [[CORO_TEST_USED(lab2b)]] auto register_wait(int register_cnt = 1) noexcept -> void;

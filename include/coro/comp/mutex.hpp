@@ -35,6 +35,7 @@ class context;
 // but keep the member function and construct function's declaration same with example.
 class mutex
 {
+public:
     struct mutex_awaiter
     {
         mutex_awaiter(context& ctx, mutex& mtx) noexcept : m_ctx(ctx), m_mtx(mtx) {}
@@ -43,6 +44,7 @@ class mutex
         auto await_suspend(std::coroutine_handle<> handle) noexcept -> bool;
         auto await_resume() noexcept -> void;
 
+        // QUESTION: Why resume the coroutine need to be submitted to the context?
         auto resume() noexcept -> void { m_ctx.submit_task(m_await_coro); }
 
         context&                m_ctx;
