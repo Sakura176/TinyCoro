@@ -21,6 +21,9 @@
 #include "coro/attribute.hpp"
 #include "coro/comp/latch.hpp"
 #include "coro/concepts/awaitable.hpp"
+#include "coro/concepts/common.hpp"
+#include "coro/scheduler.hpp"
+#include "coro/task.hpp"
 
 namespace coro
 {
@@ -43,282 +46,175 @@ namespace detail
 {
 // TODO[lab5a]: Add code that you don't want to use externally in namespace detail
 
-// 结果包装器：将void转换为std::monostate
-template<typename T>
-struct result_wrapper
+/**
+ * NOTE: CRTP静态多态
+ * 前向声明（造出一个不完整类型的名字） -> 基类将其作为类型参数生成指针级别的别名
+ *      -> 派生类真正定义 -> 模板函数在真正被调用时延迟实例化（此时派生类已完整）。
+ */
+
+/**
+ * @brief forward declaration of when_all_task_promise.
+ */
+template<typename return_type>
+class when_all_task_promise;
+
+/**
+ * @brief Base class for when_all task promises.
+ * NOTE: forward declaration and definition later
+ * NOTE: template param just for the final_suspend func
+ */
+template<typename return_type>
+struct when_all_task_promise_base
 {
-    using type = T;
+protected:
+    latch* m_latch{nullptr};
+
+public:
+    // NOTE: coroutine_handle 是一个包装了指针的轻量级对象，其指向不完整的类型是合法的
+    using coroutine_handle_type = std::coroutine_handle<when_all_task_promise<return_type>>;
+    /**
+     * @brief coroutine initial suspend, always suspends the coroutine.
+     */
+    auto initial_suspend() noexcept -> std::suspend_always { return {}; }
+    auto final_suspend() noexcept
+    {
+        struct completion_notifier
+        {
+            // suspends the coroutine until the latch count reaches zero.
+            auto await_ready() const noexcept -> bool { return false; }
+            // resumes the coroutine after the latch count reaches zero.
+            void await_suspend(coroutine_handle_type coro) const noexcept
+            {
+                // TODO: 通过handle找到latch，调用count_down；在子任务完成的最后时刻递减计数器，性能高
+                coro.promise().m_latch->count_down();
+            }
+        };
+        return completion_notifier{};
+    }
+
+    void unhandled_exception() noexcept { log::warn("when_all: unhandled exception"); }
+
+    // TODO: 为何不直接传递指针
+    void start(latch& latch) { m_latch = &latch; }
+};
+template<>
+struct when_all_task_promise<void> : public when_all_task_promise_base<void>
+{
+    auto get_return_object() noexcept -> decltype(auto);
+    auto return_void() noexcept -> void {};
+};
+
+template<concepts::conventional_type return_type>
+struct when_all_task_promise<return_type> : public when_all_task_promise_base<return_type>
+{
+public:
+    // TODO: what diff to T*;
+    using storge_type = std::add_pointer_t<return_type>;
+
+    /**
+     * @brief Sets the pointer to the return value.
+     * NOTE: the when_all_task's func start will call this function to set the pointer.
+     */
+    auto set_pointer(storge_type ptr) -> void { m_data = ptr; };
+
+    /**
+     * @brief Sets the return value.
+     * NOTE: this func is zero copy by write data to the external storage pointer.
+     */
+    auto return_value(return_type value) -> void { *m_data = value; };
+
+private:
+    storge_type m_data;
+};
+
+template<typename... task_types>
+class when_all_ready_awaitable_base
+{
+public:
+    explicit when_all_ready_awaitable_base(task_types&&... tasks) noexcept
+        : m_latch(sizeof...(task_types)),
+          m_tasks(std::move(tasks)...)
+    {
+    }
+
+    CORO_NO_COPY_MOVE(when_all_ready_awaitable_base);
+
+private:
+    latch                     m_latch;
+    std::tuple<task_types...> m_tasks;
 };
 
 template<>
-struct result_wrapper<void>
+class when_all_ready_awaitable<std::tuple<>>
 {
-    using type = std::monostate;
+    constexpr auto await_ready() const noexcept -> bool { return true; }
+    constexpr auto await_suspend() noexcept -> void {}
+    constexpr auto await_resume() const noexcept -> std::tuple<> { return {}; }
 };
 
-template<typename T>
-using result_wrapper_t = typename result_wrapper<T>::type;
-
-// 获取awaiter的返回类型
-template<typename Awaitable>
-using awaiter_return_type_t = typename concepts::awaitable_traits<Awaitable>::awaiter_return_type;
-
-// 获取awaiter类型
-template<typename Awaitable>
-using awaiter_type_t = typename concepts::awaitable_traits<Awaitable>::awaiter_type;
-
-// 中间协程的promise类型，用于处理单个awaiter
-template<typename WhenAllAwaiter, size_t Index>
-struct intermediate_promise {
-    WhenAllAwaiter* parent;
-    
-    auto get_return_object() noexcept {
-        return std::coroutine_handle<intermediate_promise>::from_promise(*this);
-    }
-    
-    auto initial_suspend() noexcept { return std::suspend_never{}; }
-    auto final_suspend() noexcept { return std::suspend_never{}; }
-    
-    void return_void() noexcept {}
-    void unhandled_exception() noexcept {
-        // 异常会被父awaiter处理
-    }
-};
-
-// 中间协程的返回类型
-template<typename WhenAllAwaiter, size_t Index>
-struct intermediate_coroutine {
-    using promise_type = intermediate_promise<WhenAllAwaiter, Index>;
-    
-    intermediate_coroutine(std::coroutine_handle<promise_type> h) : handle(h) {}
-    ~intermediate_coroutine() {
-        if (handle) {
-            handle.destroy();
-        }
-    }
-    
-    intermediate_coroutine(const intermediate_coroutine&) = delete;
-    intermediate_coroutine& operator=(const intermediate_coroutine&) = delete;
-    intermediate_coroutine(intermediate_coroutine&& other) noexcept : handle(other.handle) {
-        other.handle = nullptr;
-    }
-    intermediate_coroutine& operator=(intermediate_coroutine&& other) noexcept {
-        if (this != &other) {
-            if (handle) {
-                handle.destroy();
-            }
-            handle = other.handle;
-            other.handle = nullptr;
-        }
-        return *this;
-    }
-    
-    std::coroutine_handle<promise_type> handle;
-};
-
-// 简单的tuple迭代器
-template<typename Tuple>
-class tuple_iterator
+template<typename... task_types>
+requires(concepts::all_void_type<typename task_types::rt...>)
+class when_all_ready_awaitable<std::tuple<task_types...>> : public when_all_ready_awaitable_base<task_types...>
 {
-private:
-    const Tuple& tuple;
-    size_t index;
-    
-    // 使用递归模板函数在编译时获取元素
-    template<size_t CurrentIndex>
-    static auto get_element(const Tuple& t, size_t target_index) -> decltype(auto)
-    {
-        if constexpr (CurrentIndex < std::tuple_size_v<Tuple>)
-        {
-            if (target_index == CurrentIndex)
-            {
-                return std::get<CurrentIndex>(t);
-            }
-            else
-            {
-                return get_element<CurrentIndex + 1>(t, target_index);
-            }
-        }
-        else
-        {
-            throw std::out_of_range("tuple index out of range");
-        }
-    }
-
 public:
-    tuple_iterator(const Tuple& t, size_t i) : tuple(t), index(i) {}
-    
-    auto operator*() const -> decltype(auto)
+    auto operator co_await() noexcept
     {
-        return get_element<0>(tuple, index);
-    }
-    
-    tuple_iterator& operator++()
-    {
-        ++index;
-        return *this;
-    }
-    
-    bool operator!=(const tuple_iterator& other) const
-    {
-        return index != other.index;
-    }
-    
-    bool operator==(const tuple_iterator& other) const
-    {
-        return index == other.index;
+        std::apply([this](auto&&... tasks) { ((tasks.start(this->m_latch)), ...); }, this->m_tasks);
+        return this->m_latch.wait();
     }
 };
-
 } // namespace detail
 
-// when_all的awaiter实现
-template<typename... Awaitables>
-class when_all_awaiter
+template<typename return_type>
+struct when_all_task
 {
-private:
-    using result_tuple_t = std::tuple<detail::result_wrapper_t<detail::awaiter_return_type_t<Awaitables>>...>;
-    using awaiter_tuple_t = std::tuple<detail::awaiter_type_t<Awaitables>...>;
-    
-    // 存储所有awaiter
-    awaiter_tuple_t awaiters;
-    // 计数器，用于跟踪未完成的任务
-    latch counter{sizeof...(Awaitables)};
-    // 异常处理
-    std::mutex exception_mutex;
-    std::exception_ptr exception;
-    // 存储所有结果
-    result_tuple_t results;
-    // 存储中间协程 - 简化：我们不存储中间协程，而是使用直接的方法
-    // 注意：这不是完全正确的实现，但为了通过编译
-    
-    // 处理单个awaiter的完成
-    template<size_t I>
-    void handle_single_completion() noexcept
+public:
+    using promise_type     = detail::when_all_task_promise<return_type>;
+    using coro_handle_type = std::coroutine_handle<promise_type>;
+    using storage_type     = std::add_pointer_t<return_type>;
+
+    explicit when_all_task(coro_handle_type coro) noexcept : m_coro(coro) {}
+    when_all_task(const when_all_task&) = delete;
+    when_all_task(when_all_task&& other) noexcept : m_coro(other.m_coro) { other.m_coro = nullptr; }
+    when_all_task& operator=(const when_all_task&) = delete;
+
+    // TODO: why move operator= need to be deleted
+    when_all_task& operator=(when_all_task&& other) = delete;
+
+    ~when_all_task()
     {
-        try
-        {
-            using awaiter_type = std::tuple_element_t<I, awaiter_tuple_t>;
-            using return_type = decltype(std::declval<awaiter_type>().await_resume());
-            
-            if constexpr (!std::is_void_v<return_type>)
-            {
-                std::get<I>(results) = std::get<I>(awaiters).await_resume();
-            }
-            else
-            {
-                std::get<I>(results) = std::monostate{};
-            }
-        }
-        catch (...)
-        {
-            std::lock_guard<std::mutex> lock(exception_mutex);
-            if (!exception)
-            {
-                exception = std::current_exception();
-            }
-        }
-        
-        // 减少计数
-        counter.count_down();
-    }
-    
-    // 创建中间协程来处理单个awaiter
-    template<size_t I>
-    void process_single_awaiter() noexcept
-    {
-        auto& awaiter = std::get<I>(awaiters);
-        
-        if (awaiter.await_ready())
-        {
-            // awaiter已经就绪，立即处理
-            handle_single_completion<I>();
-        }
-        else
-        {
-            // awaiter需要挂起
-            // 简化实现：直接挂起，假设awaiter会在完成时自动恢复
-            // 注意：这不是完全正确的实现
-            awaiter.await_suspend(std::coroutine_handle<>{});
-        }
-    }
-    
-    // 启动所有awaiter
-    template<size_t... Is>
-    void start_all_awaiters(std::index_sequence<Is...>) noexcept
-    {
-        // 对每个awaiter进行处理
-        (process_single_awaiter<Is>(), ...);
+        if (m_coro)
+            m_coro.destroy();
     }
 
-public:
-    when_all_awaiter(Awaitables&&... awaitables) noexcept
-        : awaiters(concepts::get_awaiter(std::forward<Awaitables>(awaitables))...)
-    {}
-    
-    ~when_all_awaiter() = default;
-    
-    // 检查是否所有awaiter都已经就绪
-    bool await_ready() const noexcept
+    void start(latch& l, storage_type p = nullptr) noexcept
     {
-        // 检查所有awaiter是否都已经就绪
-        bool all_ready = true;
-        
-        auto check_ready = [&all_ready](const auto& awaiter)
+        if constexpr (!std::is_void_v<return_type>)
         {
-            if (!awaiter.await_ready())
-            {
-                all_ready = false;
-            }
-        };
-        
-        std::apply([&check_ready](const auto&... aws)
-        {
-            (check_ready(aws), ...);
-        }, awaiters);
-        
-        return all_ready;
-    }
-    
-    // 挂起当前协程，启动所有awaiter
-    bool await_suspend(std::coroutine_handle<> h) noexcept
-    {
-        // 启动所有awaiter
-        start_all_awaiters(std::index_sequence_for<Awaitables...>{});
-        
-        // 检查是否所有任务都已完成
-        // 我们不能直接访问latch的私有成员，所以总是挂起
-        // 在await_resume中会等待所有任务完成
-        return true;
-    }
-    
-    // 恢复时返回所有结果
-    result_tuple_t await_resume()
-    {
-        // 等待所有任务完成
-        counter.wait();
-        
-        // 检查是否有异常
-        if (exception)
-        {
-            std::rethrow_exception(exception);
+            m_coro.promise().set_pointer(p);
         }
-        
-        return std::move(results);
+        m_coro.promise().start(l);
+        submit_to_scheduler(m_coro);
     }
+
+private:
+    coro_handle_type m_coro;
 };
 
-// 为tuple提供begin/end函数，支持范围循环
-template<typename... Args>
-auto begin(const std::tuple<Args...>& tuple) -> detail::tuple_iterator<std::tuple<Args...>>
+template<
+    concepts::awaitable awaitable,
+    typename T = typename concepts::awaitable_traits<awaitable&&>::awaitable_return_type>
+static auto make_when_all_task(awaitable&& a) -> when_all_task<T>
 {
-    return {tuple, 0};
-}
-
-template<typename... Args>
-auto end(const std::tuple<Args...>& tuple) -> detail::tuple_iterator<std::tuple<Args...>>
-{
-    return {tuple, sizeof...(Args)};
+    if constexpr (std::is_void_v<T>)
+    {
+        co_await std::forward<awaitable>(a);
+        co_return;
+    }
+    else
+    {
+        co_return co_await std::forward<awaitable>(a);
+    }
 }
 
 template<concepts::awaitable... awaitables_type>
