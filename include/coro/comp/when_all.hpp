@@ -54,6 +54,10 @@ namespace detail
  *      -> 派生类真正定义 -> 模板函数在真正被调用时延迟实例化（此时派生类已完整）。
  */
 
+template<typename T>
+class when_all_ready_awaitable;
+template<typename task_container_type>
+class when_all_ready_range_awaitable;
 /**
  * @brief forward declaration of when_all_task_promise.
  */
@@ -90,6 +94,7 @@ public:
                 // TODO: 通过handle找到latch，调用count_down；在子任务完成的最后时刻递减计数器，性能高
                 coro.promise().m_latch->count_down();
             }
+            auto await_resume() const noexcept;
         };
         return completion_notifier{};
     }
@@ -99,6 +104,7 @@ public:
     // TODO: 为何不直接传递指针
     void start(latch& latch) { m_latch = &latch; }
 };
+
 template<>
 struct when_all_task_promise<void> : public when_all_task_promise_base<void>
 {
@@ -113,6 +119,7 @@ public:
     // TODO: what diff to T*;
     using storge_type = std::add_pointer_t<return_type>;
 
+    auto get_return_object() noexcept -> decltype(auto);
     /**
      * @brief Sets the pointer to the return value.
      * NOTE: the when_all_task's func start will call this function to set the pointer.
@@ -305,6 +312,7 @@ public:
         return this->m_latch.wait();
     }
 };
+
 template<typename return_type>
 struct when_all_task
 {
@@ -395,5 +403,20 @@ template<concepts::awaitable... awaitable_type>
         std::remove_reference_t<typename concepts::awaitable_traits<awaitable_type>::awaiter_return_type>>...>>(
         std::make_tuple(detail::make_when_all_task(std::move(awaitables))...));
 }
+
+namespace detail {
+    template<concepts::conventional_type return_type>
+    auto when_all_task_promise<return_type>::get_return_object() noexcept -> decltype(auto)
+    {
+        return when_all_task<return_type>{
+            when_all_task_promise_base<return_type>::coroutine_handle_type::from_promise(*this)};
+    }
+
+    // template<> NOTE: 该全特化情况无需template
+    auto when_all_task_promise<void>::get_return_object() noexcept -> decltype(auto)
+    {
+        return when_all_task<void>{when_all_task_promise_base<void>::coroutine_handle_type::from_promise(*this)};
+    }
+} // namespace detail
 
 }; // namespace coro
