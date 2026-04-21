@@ -54,8 +54,9 @@ namespace detail
  *      -> 派生类真正定义 -> 模板函数在真正被调用时延迟实例化（此时派生类已完整）。
  */
 
-template<typename T>
-class when_all_ready_awaitable;
+// template<typename T>
+// class when_all_ready_awaitable;
+
 template<typename task_container_type>
 class when_all_ready_range_awaitable;
 /**
@@ -94,7 +95,7 @@ public:
                 // TODO: 通过handle找到latch，调用count_down；在子任务完成的最后时刻递减计数器，性能高
                 coro.promise().m_latch->count_down();
             }
-            auto await_resume() const noexcept;
+            auto await_resume() const noexcept {}
         };
         return completion_notifier{};
     }
@@ -117,14 +118,14 @@ struct when_all_task_promise<return_type> : public when_all_task_promise_base<re
 {
 public:
     // TODO: what diff to T*;
-    using storge_type = std::add_pointer_t<return_type>;
+    using storage_type = std::add_pointer_t<return_type>;
 
     auto get_return_object() noexcept -> decltype(auto);
     /**
      * @brief Sets the pointer to the return value.
      * NOTE: the when_all_task's func start will call this function to set the pointer.
      */
-    auto set_pointer(storge_type ptr) -> void { m_data = ptr; };
+    auto set_pointer(storage_type ptr) -> void { m_data = ptr; };
 
     /**
      * @brief Sets the return value.
@@ -133,7 +134,7 @@ public:
     auto return_value(return_type value) -> void { *m_data = value; };
 
 private:
-    storge_type m_data;
+    storage_type m_data;
 };
 
 template<typename... task_types>
@@ -145,23 +146,31 @@ public:
           m_tasks(std::move(tasks)...)
     {
     }
-
+    explicit when_all_ready_awaitable_base(std::tuple<task_types...>&& tasks) noexcept
+        : m_latch(sizeof...(task_types)),
+          m_tasks(std::move(tasks)) // 直接移动整个 tuple 赋值给成员变量
+    {
+    }
     CORO_NO_COPY_MOVE(when_all_ready_awaitable_base);
 
-private:
+protected:
     latch                     m_latch;
     std::tuple<task_types...> m_tasks;
 };
 
 // DOCS: 模版类型必须先定义了主模版后才能再特化
-template<typename>
+template<typename T>
 class when_all_ready_awaitable;
 
 template<>
 class when_all_ready_awaitable<std::tuple<>>
 {
+public:
+    constexpr when_all_ready_awaitable() noexcept {}
+    explicit constexpr when_all_ready_awaitable(std::tuple<>) noexcept {}
+
     constexpr auto await_ready() const noexcept -> bool { return true; }
-    constexpr auto await_suspend() noexcept -> void {}
+    constexpr auto await_suspend(std::coroutine_handle<>) noexcept -> bool { return false; }
     constexpr auto await_resume() const noexcept -> std::tuple<> { return {}; }
 };
 
@@ -173,6 +182,8 @@ template<typename... task_types>
 class when_all_ready_awaitable<std::tuple<task_types...>> : public when_all_ready_awaitable_base<task_types...>
 {
 public:
+    using when_all_ready_awaitable_base<task_types...>::when_all_ready_awaitable_base;
+
     auto operator co_await() noexcept
     {
         std::apply([this](auto&&... tasks) { ((tasks.start(this->m_latch)), ...); }, this->m_tasks);
@@ -190,7 +201,7 @@ class when_all_ready_awaitable<std::tuple<task_type, task_types...>>
 public:
     // DOCS: 使用array来处理同类型情况，避免CWG#1430缺陷
     using storage_type = std::array<typename task_type::rt, 1 + sizeof...(task_types)>;
-
+    using when_all_ready_awaitable_base<task_type, task_types...>::when_all_ready_awaitable_base;
     /**
      * DOCS: 此处需达成两个需求
      * 1. 调用方阻塞，直到所有任务完成，latch带计数功能，符合需求
@@ -252,7 +263,7 @@ public:
     {
     }
 
-private:
+protected:
     latch               m_latch;
     task_container_type m_tasks;
 };
@@ -286,7 +297,7 @@ public:
         size_t p{0};
         for (auto& tasks : this->m_tasks)
         {
-            tasks.start(this->latch(), &(this->m_data[p++]));
+            tasks.start(this->latch, &(this->m_data[p++]));
         }
         return awaiter{this->m_latch.wait(), m_data};
     }
@@ -320,6 +331,7 @@ public:
     using promise_type     = detail::when_all_task_promise<return_type>;
     using coro_handle_type = std::coroutine_handle<promise_type>;
     using storage_type     = std::add_pointer_t<return_type>;
+    using rt               = return_type;
 
     explicit when_all_task(coro_handle_type coro) noexcept : m_coro(coro) {}
     when_all_task(const when_all_task&) = delete;
@@ -404,19 +416,18 @@ template<concepts::awaitable... awaitable_type>
         std::make_tuple(detail::make_when_all_task(std::move(awaitables))...));
 }
 
-namespace detail {
-    template<concepts::conventional_type return_type>
-    auto when_all_task_promise<return_type>::get_return_object() noexcept -> decltype(auto)
-    {
-        return when_all_task<return_type>{
-            when_all_task_promise_base<return_type>::coroutine_handle_type::from_promise(*this)};
-    }
+namespace detail
+{
+template<concepts::conventional_type return_type>
+auto when_all_task_promise<return_type>::get_return_object() noexcept -> decltype(auto)
+{
+    return when_all_task<return_type>{
+        when_all_task_promise_base<return_type>::coroutine_handle_type::from_promise(*this)};
+}
 
-    // template<> NOTE: 该全特化情况无需template
-    auto when_all_task_promise<void>::get_return_object() noexcept -> decltype(auto)
-    {
-        return when_all_task<void>{when_all_task_promise_base<void>::coroutine_handle_type::from_promise(*this)};
-    }
+// template<> NOTE: 该全特化情况无需template
+auto when_all_task_promise<void>::get_return_object() noexcept -> decltype(auto)
+{ return when_all_task<void>{when_all_task_promise_base<void>::coroutine_handle_type::from_promise(*this)}; }
 } // namespace detail
 
 }; // namespace coro
