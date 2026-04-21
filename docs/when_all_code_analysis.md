@@ -1,552 +1,146 @@
-# when_all 代码详细分析
+# `when_all.hpp` 实现指引文档
 
-## 一、文件结构与依赖
+## 1. 概述与架构设计
 
-### 1.1 头文件包含
-```cpp
-#pragma once
+### 1.1 功能定位
+本文件实现了 C++20 协程环境下的 `when_all` 语义：并发地启动一组协程任务，并在**所有任务均执行完毕后**恢复当前协程的执行。
+与标准库或其它实现不同，此实现高度定制化，通过**预分配内存**和**无锁倒计数**实现了极低开销的任务汇聚。
 
-#include <coroutine>
-#include <cstddef>
-#include <exception>
-#include <mutex>
-#include <tuple>
-#include <type_traits>
-#include <utility>
-
-#include "coro/attribute.hpp"
-#include "coro/comp/latch.hpp"
-#include "coro/concepts/awaitable.hpp"
-```
-
-**分析要点**：
-- 使用 `#pragma once` 而非传统的头文件守卫，更简洁
-- 标准库头文件按功能分组：协程、类型、同步、元编程
-- 项目内部头文件：属性标记、latch同步原语、awaitable概念
-
-### 1.2 命名空间组织
-```cpp
-namespace coro
-{
-namespace detail
-{
-    // 实现细节，不对外暴露
-}
-// 公共接口
-}
-```
-
-**设计原则**：
-- `coro` 作为根命名空间
-- `detail` 用于内部实现细节
-- 清晰的接口边界，避免实现细节泄漏
-
-## 二、核心类型系统
-
-### 2.1 结果类型包装器
-```cpp
-template<typename T>
-struct result_wrapper
-{
-    using type = T;
-};
-
-template<>
-struct result_wrapper<void>
-{
-    using type = std::monostate;
-};
-
-template<typename T>
-using result_wrapper_t = typename result_wrapper<T>::type;
-```
-
-**技术细节**：
-- 主模板处理非void类型，保持原类型
-- 特化模板处理void类型，转换为 `std::monostate`
-- 类型别名模板提供简洁的访问方式
-
-**为什么需要这个包装器？**
-```cpp
-// 错误：tuple不能包含void
-std::tuple<int, void, double> t;  // 编译错误
-
-// 正确：使用monostate作为占位符
-std::tuple<int, std::monostate, double> t;  // 正确
-```
-
-### 2.2 类型推导辅助
-```cpp
-template<typename Awaitable>
-using awaiter_return_type_t = 
-    typename concepts::awaitable_traits<Awaitable>::awaiter_return_type;
-
-template<typename Awaitable>
-using awaiter_type_t = 
-    typename concepts::awaitable_traits<Awaitable>::awaiter_type;
-```
-
-**类型推导流程**：
-1. `awaitable_traits<Awaitable>` 提取类型特征
-2. `awaiter_return_type` 获取 `await_resume()` 返回类型
-3. `awaiter_type` 获取awaiter类型本身
-
-## 三、when_all_awaiter 类模板
-
-### 3.1 类定义与类型别名
-```cpp
-template<typename... Awaitables>
-class when_all_awaiter
-{
-private:
-    // 结果元组类型：将所有结果包装后放入tuple
-    using result_tuple_t = std::tuple<
-        detail::result_wrapper_t<detail::awaiter_return_type_t<Awaitables>>...
-    >;
-    
-    // awaiter元组类型：存储所有awaiter
-    using awaiter_tuple_t = std::tuple<detail::awaiter_type_t<Awaitables>...>;
-    
-    // 成员变量
-    awaiter_tuple_t awaiters;          // 所有awaiter的集合
-    latch counter{sizeof...(Awaitables)}; // 任务计数器
-    std::mutex exception_mutex;        // 异常保护锁
-    std::exception_ptr exception;      // 存储第一个异常
-    result_tuple_t results;            // 结果集合
-};
-```
-
-**内存布局分析**：
-```
-+-------------------+
-| when_all_awaiter  |
-|-------------------|
-| awaiters (tuple)  |  // 编译时确定大小
-| counter (latch)   |  // 原子计数器 + event
-| exception_mutex   |  // 互斥锁
-| exception         |  // 异常指针
-| results (tuple)   |  // 结果存储
-+-------------------+
-```
-
-### 3.2 构造函数
-```cpp
-when_all_awaiter(Awaitables&&... awaitables) noexcept
-    : awaiters(concepts::get_awaiter(std::forward<Awaitables>(awaitables))...)
-{}
-```
-
-**关键技术**：
-1. **完美转发**：`std::forward<Awaitables>` 保持值类别
-2. **变参展开**：`...` 展开所有参数
-3. **noexcept**：构造函数不抛异常
-4. **get_awaiter**：将awaitable转换为awaiter
-
-**展开示例**：
-```cpp
-// 假设调用 when_all(task1, task2, task3)
-// 构造函数展开为：
-when_all_awaiter(task1, task2, task3)
-    : awaiters(
-        concepts::get_awaiter(std::forward<decltype(task1)>(task1)),
-        concepts::get_awaiter(std::forward<decltype(task2)>(task2)),
-        concepts::get_awaiter(std::forward<decltype(task3)>(task3))
-      )
-{}
-```
-
-### 3.3 await_ready() 实现
-```cpp
-bool await_ready() const noexcept
-{
-    bool all_ready = true;
-    
-    auto check_ready = [&all_ready](const auto& awaiter)
-    {
-        if (!awaiter.await_ready())
-        {
-            all_ready = false;
-        }
-    };
-    
-    std::apply([&check_ready](const auto&... aws)
-    {
-        (check_ready(aws), ...);
-    }, awaiters);
-    
-    return all_ready;
-}
-```
-
-**优化策略**：
-- **短路求值**：发现一个未就绪就停止检查（当前实现未优化）
-- **并行检查**：理论上可以并行检查，但需要权衡开销
-- **缓存结果**：如果频繁检查，可以缓存结果
-
-**改进建议**：
-```cpp
-bool await_ready() const noexcept
-{
-    return [this]<size_t... Is>(std::index_sequence<Is...>)
-    {
-        return (std::get<Is>(awaiters).await_ready() && ...);
-    }(std::index_sequence_for<Awaitables...>{});
-}
-```
-
-### 3.4 await_suspend() 实现
-```cpp
-bool await_suspend(std::coroutine_handle<> h) noexcept
-{
-    // 启动所有awaiter
-    start_all_awaiters(std::index_sequence_for<Awaitables...>{});
-    
-    // 总是挂起，在await_resume中等待
-    return true;
-}
-```
-
-**启动所有awaiter的实现**：
-```cpp
-template<size_t... Is>
-void start_all_awaiters(std::index_sequence<Is...>) noexcept
-{
-    // 对每个awaiter进行处理
-    (process_single_awaiter<Is>(), ...);
-}
-
-template<size_t I>
-void process_single_awaiter() noexcept
-{
-    auto& awaiter = std::get<I>(awaiters);
-    
-    if (awaiter.await_ready())
-    {
-        // awaiter已经就绪，立即处理
-        handle_single_completion<I>();
-    }
-    else
-    {
-        // awaiter需要挂起
-        // 简化实现：直接挂起
-        awaiter.await_suspend(std::coroutine_handle<>{});
-    }
-}
-```
-
-**问题分析**：
-当前实现中，当awaiter未就绪时，传递了空的协程句柄。这意味着：
-1. awaiter完成时不会调用我们的回调
-2. 计数器可能永远不会减少
-3. 主协程可能永远等待
-
-**正确实现思路**：
-```cpp
-// 应为每个awaiter创建continuation
-awaiter.await_suspend(create_continuation<I>());
-
-// continuation应该：
-// 1. 调用 handle_single_completion<I>()
-// 2. 减少计数器
-// 3. 检查是否需要恢复主协程
-```
-
-### 3.5 单个任务完成处理
-```cpp
-template<size_t I>
-void handle_single_completion() noexcept
-{
-    try
-    {
-        using awaiter_type = std::tuple_element_t<I, awaiter_tuple_t>;
-        using return_type = decltype(std::declval<awaiter_type>().await_resume());
-        
-        if constexpr (!std::is_void_v<return_type>)
-        {
-            std::get<I>(results) = std::get<I>(awaiters).await_resume();
-        }
-        else
-        {
-            std::get<I>(results) = std::monostate{};
-        }
-    }
-    catch (...)
-    {
-        std::lock_guard<std::mutex> lock(exception_mutex);
-        if (!exception)
-        {
-            exception = std::current_exception();
-        }
-    }
-    
-    counter.count_down();
-}
-```
-
-**异常处理细节**：
-1. **try-catch块**：捕获 `await_resume()` 可能抛出的异常
-2. **锁保护**：`exception_mutex` 保护 `exception` 的并发访问
-3. **第一个异常**：只保存第一个异常，后续异常被忽略
-4. **noexcept**：函数标记为noexcept，但内部使用try-catch
-
-**类型推导技巧**：
-```cpp
-// 使用 decltype + std::declval 推导返回类型
-using return_type = decltype(std::declval<awaiter_type>().await_resume());
-
-// 编译时判断是否为void
-if constexpr (!std::is_void_v<return_type>) {
-    // 非void类型：存储实际值
-} else {
-    // void类型：存储monostate占位符
-}
-```
-
-### 3.6 await_resume() 实现
-```cpp
-result_tuple_t await_resume()
-{
-    // 等待所有任务完成
-    counter.wait();
-    
-    // 检查是否有异常
-    if (exception)
-    {
-        std::rethrow_exception(exception);
-    }
-    
-    return std::move(results);
-}
-```
-
-**等待机制**：
-1. `counter.wait()`：调用latch的wait方法
-2. 如果计数器不为0，当前协程挂起
-3. 当最后一个任务调用 `count_down()` 时，event被设置，等待的协程恢复
-
-**异常传播**：
-- 使用 `std::rethrow_exception` 重新抛出异常
-- 保持原始异常类型和调用栈信息
-- 符合C++异常处理惯例
-
-## 四、迭代器支持实现
-
-### 4.1 tuple_iterator 类模板
-```cpp
-template<typename Tuple>
-class tuple_iterator
-{
-private:
-    const Tuple& tuple;
-    size_t index;
-    
-    // 编译时递归获取元素
-    template<size_t CurrentIndex>
-    static auto get_element(const Tuple& t, size_t target_index) -> decltype(auto)
-    {
-        if constexpr (CurrentIndex < std::tuple_size_v<Tuple>)
-        {
-            if (target_index == CurrentIndex)
-            {
-                return std::get<CurrentIndex>(t);
-            }
-            else
-            {
-                return get_element<CurrentIndex + 1>(t, target_index);
-            }
-        }
-        else
-        {
-            throw std::out_of_range("tuple index out of range");
-        }
-    }
-
-public:
-    tuple_iterator(const Tuple& t, size_t i) : tuple(t), index(i) {}
-    
-    auto operator*() const -> decltype(auto)
-    {
-        return get_element<0>(tuple, index);
-    }
-    
-    tuple_iterator& operator++()
-    {
-        ++index;
-        return *this;
-    }
-    
-    bool operator!=(const tuple_iterator& other) const
-    {
-        return index != other.index;
-    }
-    
-    bool operator==(const tuple_iterator& other) const
-    {
-        return index == other.index;
-    }
-};
-```
-
-**编译时递归分析**：
-```
-get_element<0>(tuple, 2)
-  ↓
-get_element<1>(tuple, 2)
-  ↓
-get_element<2>(tuple, 2)  // 匹配，返回 std::get<2>(tuple)
-```
-
-**性能特点**：
-- 编译时展开递归，零运行时开销
-- 边界检查在编译时完成（对于常量索引）
-- 异常路径很少执行，不影响正常情况性能
-
-### 4.2 begin/end 自由函数
-```cpp
-template<typename... Args>
-auto begin(const std::tuple<Args...>& tuple) -> detail::tuple_iterator<std::tuple<Args...>>
-{
-    return {tuple, 0};
-}
-
-template<typename... Args>
-auto end(const std::tuple<Args...>& tuple) -> detail::tuple_iterator<std::tuple<Args...>>
-{
-    return {tuple, sizeof...(Args)};
-}
-```
-
-**ADL（参数依赖查找）优势**：
-```cpp
-// 可以这样使用
-for (auto& item : my_tuple) {
-    // ...
-}
-
-// 编译器查找顺序：
-// 1. std::begin(my_tuple) - 不存在
-// 2. ADL：在tuple所在命名空间查找begin
-// 3. 找到我们定义的begin函数
-```
-
-## 五、when_all 工厂函数
-
-### 5.1 函数声明
-```cpp
-template<concepts::awaitable... awaitables_type>
-[[CORO_TEST_USED(lab5a)]] [[CORO_AWAIT_HINT]] 
-static auto when_all(awaitables_type&&... awaitables) noexcept
-    -> when_all_awaiter<awaitables_type...>
-{
-    return {std::forward<awaitables_type>(awaitables)...};
-}
-```
-
-**属性标记分析**：
-- `[[CORO_TEST_USED(lab5a)]]`：测试框架使用的标记
-- `[[CORO_AWAIT_HINT]]`：提示编译器这是awaitable对象
-- `static`：内部链接，避免ODR问题
-- `noexcept`：函数不抛异常
-
-**返回类型推导**：
-```cpp
-// 推导示例：
-when_all(task1, task2, task3)
-// 返回类型：
-when_all_awaiter<
-    decltype(task1), 
-    decltype(task2), 
-    decltype(task3)
->
-```
-
-## 六、编译与测试要点
-
-### 6.1 编译检查
-```bash
-# 检查语法错误
-g++ -std=c++20 -fsyntax-only when_all.hpp
-
-# 检查所有实例化
-g++ -std=c++20 -ftemplate-depth=1024 test.cpp
-```
-
-### 6.2 测试用例设计
-```cpp
-// 基本功能测试
-TEST(WhenAllTest, BasicFunctionality) {
-    auto [a, b] = co_await when_all(task1(), task2());
-    ASSERT_EQ(a + b, expected);
-}
-
-// 异常测试
-TEST(WhenAllTest, ExceptionPropagation) {
-    EXPECT_THROW({
-        co_await when_all(throw_exception(), normal_task());
-    }, std::runtime_error);
-}
-
-// 性能测试
-TEST(WhenAllTest, Performance) {
-    auto start = std::chrono::high_resolution_clock::now();
-    co_await when_all(task1(), task2(), task3(), task4());
-    auto duration = std::chrono::high_resolution_clock::now() - start;
-    ASSERT_LT(duration, 100ms);
-}
-```
-
-## 七、改进建议
-
-### 7.1 当前实现的问题
-1. **Continuation缺失**：awaiter完成时不会回调
-2. **内存泄漏风险**：中间状态可能泄漏
-3. **取消支持缺失**：无法取消进行中的任务
-
-### 7.2 改进方案
-```cpp
-// 方案1：使用中间协程
-template<size_t I>
-auto create_intermediate_coroutine() {
-    co_await std::get<I>(awaiters);
-    handle_single_completion<I>();
-}
-
-// 方案2：使用回调包装器
-template<size_t I>
-struct completion_callback {
-    when_all_awaiter* parent;
-    
-    void operator()() {
-        parent->template handle_single_completion<I>();
-    }
-};
-```
-
-### 7.3 生产级实现要点
-1. **内存池**：避免频繁分配协程帧
-2. **调试支持**：添加协程ID和追踪
-3. **性能分析**：添加性能计数器和指标
-4. **文档完善**：完整的API文档和示例
-
-## 八、总结
-
-### 8.1 技术亮点
-1. **类型安全的泛型设计**：充分利用C++模板系统
-2. **编译时优化**：零运行时类型信息开销
-3. **异常安全**：完善的异常处理机制
-4. **简洁的API**：符合现代C++设计理念
-
-### 8.2 学习价值
-- 深入理解C++20协程机制
-- 掌握高级模板编程技巧
-- 学习并发编程最佳实践
-- 了解系统级API设计原则
-
-### 8.3 实际应用
-- 网络编程中的并发请求
-- 并行计算任务分发
-- 资源加载和初始化
-- 分布式系统协调
+### 1.2 核心设计思想
+*   **惰性启动**：任务在包装时被创建，但立刻挂起（`initial_suspend` 返回 `suspend_always`），只有在调用 `co_await when_all(...)` 时才被统一提交给调度器。
+*   **零拷贝结果收集**：对于非 `void` 返回类型的任务，返回值存放的内存由外层 `when_all` 容器（`std::array` 或 `std::vector`）预先分配，任务 Promise 内部仅持有一个指针指向该内存，避免了二次分配。
+*   **类型分派优化**：通过 C++20 Concepts 强约束，将全 `void` 返回、全相同 POD 返回、以及范围式返回进行模板特化分离，杜绝了复杂的 `std::variant` 开销。
 
 ---
-*本文档详细分析了when_all的实现细节，适合深入理解C++20协程和高级模板编程。*
+
+## 2. 前置依赖解析
+
+在深入实现逻辑前，需明确代码依赖的外部组件（假设位于同项目的其它模块中）：
+
+| 依赖组件 | 职责假设 | 在本文件中的使用方式 |
+| :--- | :--- | :--- |
+| `coro/comp/latch.hpp` | 提供一个轻量级的线程安全/协程安全的倒计数同步原语。 | 初始化计数值为任务数量；任务结束时调用 `count_down()`；调用者通过 `wait()` 获取 awaiter 阻塞等待。 |
+| `coro/concepts/awaitable.hpp` | 提供概念约束：`awaitable`、`awaitable_traits`、`conventional_type`、`all_void_type` 等。 | 用于在编译期萃取任务的返回值类型 `rt`，并约束模板特化路径。 |
+| `coro/scheduler.hpp` | 提供协程调度器及 `submit_to_scheduler(handle)` 接口。 | 在任务真正开始时，将协程句柄抛入调度队列。 |
+
+---
+
+## 3. 逻辑拆分与实现步骤
+
+整个实现可按**自底向上**的顺序拆分为 6 个核心步骤：
+
+### 步骤 1：实现底层任务骨架 (`when_all_task_promise_base`)
+**目的**：定义所有 `when_all` 内部任务共用的生命周期行为。
+**实现细节**：
+1.  **构造与挂起**：`initial_suspend` 必须返回 `std::suspend_always`，确保 `make_when_all_task` 协程创建后立刻暂停，将控制权交还给调用方。
+2.  **结束与通知**：`final_suspend` 返回自定义的 `completion_notifier`。在其 `await_suspend` 中调用 `m_latch->count_down()`。这是整个机制的核心：任务执行完的最后一步，自动递减计数器。
+3.  **异常处理**：`unhandled_exception` 留空（注释标明 Keep simple）。*注意：实际生产中应考虑捕获异常并在 `when_all` 层面抛出。*
+4.  **状态注入**：提供 `start(latch& l)` 方法，供外部在启动前注入倒计数器的指针。
+
+### 步骤 2：实现返回值分派
+**目的**：处理 `void` 和非 `void` 任务的返回值存储差异。
+**实现细节**：
+1.  **非 void 特化 (`when_all_task_promise<T>`)**：
+    *   增加成员 `storage_type m_data`（实质为 `T*` 指针）。
+    *   提供 `set_pointer(T* ptr)` 接口。
+    *   `return_value(T value)` 中执行 `*m_data = std::move(value);`。**关键点：不发生内存分配，直接写入外部预分配的地址。**
+2.  **void 特化 (`when_all_task_promise<void>`)**：
+    *   无需指针成员。
+    *   仅实现 `return_void()`。
+
+### 步骤 3：封装协程句柄 (`when_all_task`)
+**目的**：提供 RAII 管理，并封装“启动”动作。
+**实现细节**：
+1.  持有 `std::coroutine_handle<promise_type>`。
+2.  析构函数中检查句柄有效性并调用 `destroy()`，防止协程泄漏。
+3.  实现 `start(latch& l, storage_type p)`：
+    *   若非 `void`，先调用 `promise().set_pointer(p)` 绑定结果内存。
+    *   调用 `promise().start(l)` 绑定计数器。
+    *   调用 `submit_to_scheduler(m_handle)` 真正将任务投入执行池。
+
+### 步骤 4：实现类型擦除与包装工厂 (`make_when_all_task`)
+**目的**：将用户传入的任意 `awaitable`（如 `task<T>`、`generator` 等）统一转化为 `when_all_task<T>`。
+**实现细节**：
+1.  这是一个模板协程。
+2.  内部逻辑极简：`co_return co_await std::forward<awaitable>(a);`
+3.  因为 Step 1 中设定了 `suspend_always`，执行到 `co_await` 前就会返回，这里的代码实际上是在任务被调度器唤醒后才执行的。
+
+### 步骤 5：实现定长容器 Awaitable (Tuple 版本)
+**目的**：处理编译期确定数量的任务汇聚（对应变参模板 `when_all`）。
+**实现细节**：
+1.  **空元组特化**：直接返回 `std::tuple{}`，`await_ready` 返回 `true`，无任何阻塞。
+2.  **全 void 特化**：继承 `when_all_ready_awaitable_base`。在 `operator co_await` 中，使用折叠表达式 `(tasks.start(latch), ...)` 启动所有任务，返回 `latch.wait()` 的 awaiter。
+3.  **全相同 POD 特化 (解决 CWG #1430 缺陷)**：
+    *   成员变量增加 `storage_type m_data`（即 `std::array<T, N>`）。
+    *   `operator co_await` 返回自定义的 `awaiter` 结构体。该结构体组合了 `latch.wait()` 的 awaiter 和对 `m_data` 的引用。
+    *   启动时，利用折叠表达式和一个递增的 `index`，将 `m_data[i]` 的地址作为第二个参数传给 `tasks.start(latch, &m_data[i])`。
+    *   恢复时 (`await_resume`)，将 `m_data` 移动返回。
+
+### 步骤 6：实现动态容器 Awaitable (Range 版本)
+**目的**：处理运行时确定数量的任务汇聚（如传入 `std::vector<task<T>>`）。
+**实现细节**：
+1.  **非 void 特化**：类似 Step 5 的全相同 POD，但存储容器换成了 `std::vector<T>`。在 `operator co_await` 时根据 `size()` 预先 `resize` vector，通过循环 `for (auto& t : tasks)` 启动并传递指针。
+2.  **void 特化**：通过 `requires(std::is_void_v<...>)` 约束。无需分配结果内存，直接循环调用 `tasks.start(latch)`，返回底层的 `latch.wait()` awaiter。
+
+### 步骤 7：组装公共 API (`when_all` 函数重载)
+**目的**：提供简洁的用户接口，隐藏内部复杂的模板推导。
+**实现细节**：
+1.  **变参版本**：接收 `awaitables_type...`。利用 `std::make_tuple` 结合 `make_when_all_task`，推导出 `std::tuple<when_all_task<T1>, when_all_task<T2>...>`，传入对应的 Awaitable 类。
+2.  **Range 版本**：接收 `range_type&&`。推导值类型，构建 `std::vector<when_all_task<T>>`。若原 Range 支持 `sized_range`，则调用 `reserve` 优化内存分配。遍历原 range，`emplace_back` 新任务，最后将 vector 移动传入 Range Awaitable。
+
+---
+
+## 4. 关键执行时序图
+
+以 `auto [r1, r2] = co_await when_all(task1(), task2());` 为例：
+
+```text
+[Caller Coroutine]
+       |
+       |----> 1. 调用 when_all(task1, task2)
+       |         -> 创建 task1_handle (挂起于 initial_suspend)
+       |         -> 创建 task2_handle (挂起于 initial_suspend)
+       |         -> 返回 when_all_ready_awaitable (内部含 array<ret, 2> 和 latch(2))
+       |
+       |----> 2. 执行 co_await (触发 operator co_await)
+       |         -> task1.start(latch, &array[0])
+       |              -> 绑定指针
+       |              -> latch 计数器仍为 2
+       |              -> submit_to_scheduler(task1_handle)  ------+
+       |                                                         | (异步并发执行)
+       |         -> task2.start(latch, &array[1])                v
+       |              -> submit_to_scheduler(task2_handle)  [Scheduler 线程池]
+       |                                                       task1 执行完毕
+       |         -> latch.wait() 返回 awaiter                   -> 写入 array[0]
+       |              -> Caller 挂起于 latch.wait()              -> final_suspend
+                                                                -> latch.count_down() (变1)
+                                                               task2 执行完毕
+                                                                -> 写入 array[1]
+                                                                -> final_suspend
+                                                                -> latch.count_down() (变0)
+                                                                         |
+       |<----------------------------------------------------------------+
+       |
+       |----> 3. latch.wait() 满足条件，恢复 Caller
+       |         -> await_resume 触发
+       |         -> std::move(array) 返回
+       |
+       |----> 4. 结构化绑定解包 r1, r2
+```
+
+---
+
+## 5. 代码审查与潜在改进点
+
+虽然代码设计精巧，但在实际工程落地前需注意以下几点：
+
+1.  **异常安全致命缺陷**：
+    `unhandled_exception()` 为空。如果某个子任务抛出异常，协程会在此终止并携带异常，但 `final_suspend` 仍会执行 `count_down`。最终 `when_all` 会在另一个任务正常结束时误以为所有任务成功，导致未定义行为或静默错误。
+    *改进建议*：在 Promise 中增加 `std::exception_ptr`，在 `return_value`/`return_void` 时记录成功状态，`unhandled_exception` 时记录异常。在 `await_resume` 时检查是否有异常，若有则重新抛出（可包装在 `when_all_error` 中）。
+2.  **CWG #1430 的局限性**：
+    当前代码强制要求非 void 情况下，所有任务返回值必须是**完全相同的 POD 类型**。这意味着无法执行 `when_all(task_returning_int(), task_returning_string())`。
+    *改进建议*：如果需要支持异构返回类型，必须放弃 `std::array`，转而使用 `std::tuple<std::optional<T1>, std::optional<T2>...>`，但这会显著增加模板元编程的复杂度和运行期开销。当前设计（强制同类型）在性能上是更优的选择。
+3.  **生命周期风险**：
+    `when_all_ready_awaitable` 内部的 `m_data` 是局部成员。在非 void 的 `awaiter` 中，通过引用捕获了 `m_data`。必须确保 `awaiter` 的生命周期不长于 `when_all_ready_awaitable` 对象本身。当前由于 `co_await` 表达式的临时值生命周期被延长至表达式结束，因而是安全的，但在重构时需格外小心。
+4.  **移动语义缺失**：
+    `when_all_task` 禁用了拷贝和移动。这意味着包含任务的 `std::vector` 或 `std::tuple` 本身也是不可移动的（只能作为右值被完美转发一次）。这在目前的设计下是合理的，因为移动协程句柄容易引发悬垂指针，但限制了某些高级用法的灵活性。

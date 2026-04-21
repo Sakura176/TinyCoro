@@ -14,11 +14,13 @@
 #include <cstddef>
 #include <exception>
 #include <mutex>
+#include <ranges>
 #include <tuple>
 #include <type_traits>
 #include <utility>
 
 #include "coro/attribute.hpp"
+#include "coro/comp/event.hpp"
 #include "coro/comp/latch.hpp"
 #include "coro/concepts/awaitable.hpp"
 #include "coro/concepts/common.hpp"
@@ -144,6 +146,10 @@ private:
     std::tuple<task_types...> m_tasks;
 };
 
+// DOCS: 模版类型必须先定义了主模版后才能再特化
+template<typename>
+class when_all_ready_awaitable;
+
 template<>
 class when_all_ready_awaitable<std::tuple<>>
 {
@@ -152,8 +158,11 @@ class when_all_ready_awaitable<std::tuple<>>
     constexpr auto await_resume() const noexcept -> std::tuple<> { return {}; }
 };
 
+/**
+ * @brief void type specialization of when_all_ready_awaitable
+ */
 template<typename... task_types>
-requires(concepts::all_void_type<typename task_types::rt...>)
+    requires(concepts::all_void_type<typename task_types::rt...>)
 class when_all_ready_awaitable<std::tuple<task_types...>> : public when_all_ready_awaitable_base<task_types...>
 {
 public:
@@ -163,8 +172,139 @@ public:
         return this->m_latch.wait();
     }
 };
-} // namespace detail
 
+template<typename task_type, typename... task_types>
+    requires(
+        concepts::all_noref_pod<typename task_type::rt, typename task_types::rt...> &&
+        concepts::all_same_type<typename task_type::rt, typename task_types::rt...>)
+class when_all_ready_awaitable<std::tuple<task_type, task_types...>>
+    : public when_all_ready_awaitable_base<task_type, task_types...> // ? 基类的模版参数定义的是一个，为何能传入两个
+{
+public:
+    // DOCS: 使用array来处理同类型情况，避免CWG#1430缺陷
+    using storage_type = std::array<typename task_type::rt, 1 + sizeof...(task_types)>;
+
+    /**
+     * DOCS: 此处需达成两个需求
+     * 1. 调用方阻塞，直到所有任务完成，latch带计数功能，符合需求
+     * 2. 任务结束当调用方恢复时，需返回array结果
+     */
+    auto operator co_await() noexcept
+    {
+        /**
+         * @brief 内部定义awaiter壳子，实际调用latch内部awaiter能力
+         * DOCS: 基于装饰器的组合模式，复用已有awaiter能力，避免重复实现
+         * 在结束时传递数据完成第二个需求
+         * 优点：
+         * 1. 复用已有awaiter能力，无需重复实现
+         * 2. 在结束时传递数据，避免额外的内存分配
+         * 3. 内部结构体，生命周期严格保证在co_await期间
+         */
+        struct awaiter
+        {
+            auto await_ready() noexcept -> bool { return m_awaiter.await_ready(); }
+            auto await_suspend(std::coroutine_handle<> awaiting_coro) noexcept -> bool
+            { return m_awaiter.await_suspend(awaiting_coro); }
+            auto await_resume() noexcept -> decltype(auto)
+            {
+                m_awaiter.await_resume(); // 清理状态
+                return std::move(m_data); // 转移预分配的数组
+            }
+
+            latch::event_t::awaiter m_awaiter;
+            storage_type&           m_data;
+        };
+
+        std::apply(
+            [this](auto&... tasks)
+            {
+                size_t p{0};
+                ((tasks.start(this->m_latch, &(this->m_data[p++]))), ...);
+                /**
+                 * DOCS: 折叠展开如下
+                 * task_0.start(latch, &data[0]);
+                 * task_1.start(latch, &data[1]);
+                 * ...
+                 */
+            },
+            this->m_tasks);
+        return awaiter{this->m_latch.wait(), m_data};
+    }
+
+private:
+    storage_type m_data;
+};
+
+template<typename task_container_type>
+class when_all_ready_range_awaitable_range_base
+{
+public:
+    explicit when_all_ready_range_awaitable_range_base(task_container_type&& tasks)
+        : m_latch(std::ranges::size(tasks)),
+          m_tasks(std::move(tasks))
+    {
+    }
+
+private:
+    latch               m_latch;
+    task_container_type m_tasks;
+};
+
+template<typename task_container_type>
+class when_all_ready_range_awaitable : public when_all_ready_range_awaitable_range_base<task_container_type>
+{
+public:
+    using return_type  = typename std::ranges::range_value_t<task_container_type>::rt;
+    using storage_type = std::vector<return_type>;
+
+    auto operator co_await() noexcept
+    {
+        struct awaiter
+        {
+            auto await_ready() noexcept -> bool { return m_awaiter.await_ready(); }
+            auto await_suspend(std::coroutine_handle<> awaiting_coro) noexcept -> bool
+            { return m_awaiter.await_suspend(awaiting_coro); }
+            auto await_resume() noexcept -> decltype(auto)
+            {
+                m_awaiter.await_resume(); // 清理状态
+                return std::move(m_data); // 转移预分配的数组
+            }
+
+            latch::event_t::awaiter m_awaiter;
+            storage_type&           m_data;
+        };
+        storage_type data(std::ranges::size(this->m_tasks));
+        m_data = data;
+
+        size_t p{0};
+        for (auto& tasks : this->m_tasks)
+        {
+            tasks.start(this->latch(), &(this->m_data[p++]));
+        }
+        return awaiter{this->m_latch.wait(), m_data};
+    }
+
+private:
+    storage_type m_data;
+};
+
+template<typename task_container_type>
+    requires(std::is_void_v<typename std::ranges::range_value_t<task_container_type>::rt>)
+class when_all_ready_range_awaitable<task_container_type>
+    : public when_all_ready_range_awaitable_range_base<task_container_type>
+{
+public:
+    auto operator co_await() noexcept -> latch::event_t::awaiter
+    {
+        for (auto& tasks : this->m_tasks)
+        {
+            // 不传指针，只传 latch
+            tasks.start(this->m_latch);
+        }
+        // 直接返回底层的 latch awaiter，不需要组合模式
+        return this->m_latch.wait();
+    }
+};
 template<typename return_type>
 struct when_all_task
 {
@@ -203,7 +343,7 @@ private:
 
 template<
     concepts::awaitable awaitable,
-    typename T = typename concepts::awaitable_traits<awaitable&&>::awaitable_return_type>
+    typename T = typename concepts::awaitable_traits<awaitable&&>::awaiter_return_type>
 static auto make_when_all_task(awaitable&& a) -> when_all_task<T>
 {
     if constexpr (std::is_void_v<T>)
@@ -217,14 +357,43 @@ static auto make_when_all_task(awaitable&& a) -> when_all_task<T>
     }
 }
 
-template<concepts::awaitable... awaitables_type>
-[[CORO_TEST_USED(lab5a)]] [[CORO_AWAIT_HINT]] static auto when_all(awaitables_type&&... awaitables) noexcept
-    -> when_all_awaiter<awaitables_type...>
+} // namespace detail
+
+template<
+    std::ranges::range  range_type,
+    concepts::awaitable awaitable_type = std::ranges::range_value_t<range_type>,
+    typename return_type               = typename concepts::awaitable_traits<awaitable_type>::awaiter_return_type>
+static auto when_all(range_type&& awaitables)
+{
+    // 1. 统一包装类型：无论输入什么，内部只持有 vector<when_all_task<T>>
+    using task_container_type = std::vector<detail::when_all_task<std::remove_reference_t<return_type>>>;
+    task_container_type output_tasks;
+
+    // 2. 性能优化：如果输入容器支持 O(1) 获取大小，提前预留内存
+    if constexpr (std::ranges::sized_range<range_type>)
+    {
+        output_tasks.reserve(std::size(awaitables));
+    }
+
+    // 3. 运行期循环：逐个调用 make_when_all_task 进行类型擦除和包装
+    for (auto&& a : awaitables)
+    {
+        output_tasks.emplace_back(detail::make_when_all_task(std::move(a)));
+    }
+
+    // 4. 将装有标准任务的 vector 移交给底层的 Awaitable
+    return detail::when_all_ready_range_awaitable<task_container_type>(std::move(output_tasks));
+}
+
+template<concepts::awaitable... awaitable_type>
+[[CORO_TEST_USED(lab5a)]] [[CORO_AWAIT_HINT]] static auto when_all(awaitable_type... awaitables) noexcept
+    -> decltype(auto)
 {
     // TODO[lab5a] : Add codes if you need,
     // change return type to awaiter implemented by you
-
-    return {std::forward<awaitables_type>(awaitables)...};
+    return detail::when_all_ready_awaitable<std::tuple<detail::when_all_task<
+        std::remove_reference_t<typename concepts::awaitable_traits<awaitable_type>::awaiter_return_type>>...>>(
+        std::make_tuple(detail::make_when_all_task(std::move(awaitables))...));
 }
 
 }; // namespace coro
