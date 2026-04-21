@@ -45,9 +45,9 @@ auto scheduler::stop_impl() noexcept -> void
 
     for (int i = 0; i < m_ctx_cnt; i++)
     {
-        log::debug("begin context::join");
+        log::debug("begin context::join index: {}", i);
         m_ctxs[i]->join();
-        log::debug("end context::join");
+        log::debug("end context::join index: {}", i);
     }
     log::debug("end stop_impl m_ctx_cnt: {}", m_ctx_cnt);
 }

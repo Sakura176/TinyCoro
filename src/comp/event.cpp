@@ -22,6 +22,7 @@ auto event_base::awaiter_base::await_suspend(std::coroutine_handle<> handle) noe
 
 auto event_base::set_state() noexcept -> void
 {
+    log::debug("event_base::set_state: m_state: {}", m_state.load(std::memory_order_acquire));
     // 将当前事件对象指针设置为新状态，同时返回旧状态值
     auto flag = m_state.exchange(this, std::memory_order_acq_rel);
     if (flag != this)
@@ -38,6 +39,7 @@ auto event_base::is_set() const noexcept -> bool
 
 auto event_base::resume_all_awaiter(detail::awaiter_ptr waiter) noexcept -> void
 {
+    log::debug("resume_all_awaiter: start, waiter: {}", waiter);
     int count = 0;
 
     while (waiter != nullptr)
@@ -46,6 +48,7 @@ auto event_base::resume_all_awaiter(detail::awaiter_ptr waiter) noexcept -> void
 
         if (!cur->m_await_coro || cur->m_await_coro.done())
         {
+            log::debug("resume_all_awaiter: m_await_coro is null or done, count: {}", count);
             waiter = cur->m_next;
             continue;
         }

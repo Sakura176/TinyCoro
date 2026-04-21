@@ -57,7 +57,9 @@ struct promise_base
         template<typename promise_type>
         auto await_suspend(std::coroutine_handle<promise_type> coroutine) noexcept -> std::coroutine_handle<>
         {
+            log::debug("promise_base awaiter_base await_suspend");
             auto& promise = coroutine.promise();
+            log::debug("promise_base awaiter_base await_suspend: m_continuation: {}", promise.m_continuation == nullptr);
             return promise.m_continuation == nullptr ? std::noop_coroutine() : promise.m_continuation;
         }
 
