@@ -9,6 +9,7 @@
 #include "coro/comp/mutex_guard.hpp"
 #include "coro/context.hpp"
 #include "coro/detail/types.hpp"
+#include "coro/log.hpp"
 
 namespace coro
 {
@@ -45,7 +46,11 @@ public:
         auto await_resume() noexcept -> void;
 
         // QUESTION: Why resume the coroutine need to be submitted to the context?
-        auto resume() noexcept -> void { m_ctx.submit_task(m_await_coro); }
+        auto resume() noexcept -> void 
+        { 
+            log::debug("mutex_awaiter::resume: ctx_id={}, coro={}", m_ctx.get_ctx_id(), reinterpret_cast<uintptr_t>(m_await_coro.address()));
+            m_ctx.submit_task(m_await_coro); 
+        }
 
         context&                m_ctx;
         mutex&                  m_mtx;

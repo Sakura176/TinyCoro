@@ -24,6 +24,7 @@
 #include "coro/comp/latch.hpp"
 #include "coro/concepts/awaitable.hpp"
 #include "coro/concepts/common.hpp"
+#include "coro/log.hpp"
 #include "coro/scheduler.hpp"
 #include "coro/task.hpp"
 
@@ -93,6 +94,10 @@ public:
             void await_suspend(coroutine_handle_type coro) const noexcept
             {
                 // TODO: 通过handle找到latch，调用count_down；在子任务完成的最后时刻递减计数器，性能高
+                log::debug(
+                    "when_all_task_promise::completion_notifier::await_suspend: coro={}, latch={}",
+                    reinterpret_cast<uintptr_t>(coro.address()),
+                    reinterpret_cast<uintptr_t>(coro.promise().m_latch));
                 coro.promise().m_latch->count_down();
             }
             auto await_resume() const noexcept {}
@@ -103,7 +108,11 @@ public:
     void unhandled_exception() noexcept { log::warn("when_all: unhandled exception"); }
 
     // TODO: 为何不直接传递指针
-    void start(latch& latch) { m_latch = &latch; }
+    void start(latch& latch)
+    {
+        log::debug("when_all_task_promise::start: setting latch={}", reinterpret_cast<uintptr_t>(&latch));
+        m_latch = &latch;
+    }
 };
 
 template<>
@@ -222,7 +231,9 @@ public:
         {
             auto await_ready() noexcept -> bool { return m_awaiter.await_ready(); }
             auto await_suspend(std::coroutine_handle<> awaiting_coro) noexcept -> bool
-            { return m_awaiter.await_suspend(awaiting_coro); }
+            {
+                return m_awaiter.await_suspend(awaiting_coro);
+            }
             auto await_resume() noexcept -> decltype(auto)
             {
                 m_awaiter.await_resume(); // 清理状态
@@ -281,7 +292,9 @@ public:
         {
             auto await_ready() noexcept -> bool { return m_awaiter.await_ready(); }
             auto await_suspend(std::coroutine_handle<> awaiting_coro) noexcept -> bool
-            { return m_awaiter.await_suspend(awaiting_coro); }
+            {
+                return m_awaiter.await_suspend(awaiting_coro);
+            }
             auto await_resume() noexcept -> decltype(auto)
             {
                 m_awaiter.await_resume(); // 清理状态
@@ -349,12 +362,25 @@ public:
 
     void start(latch& l, storage_type p = nullptr) noexcept
     {
+        log::debug(
+            "when_all_task::start: coro={}, latch={}, has_pointer={}",
+            reinterpret_cast<uintptr_t>(m_coro.address()),
+            reinterpret_cast<uintptr_t>(&l),
+            p != nullptr);
         if constexpr (!std::is_void_v<return_type>)
         {
             m_coro.promise().set_pointer(p);
         }
         m_coro.promise().start(l);
-        submit_to_scheduler(m_coro);
+        // NOTE:
+        // 使用 submit_to_context 而非 submit_to_scheduler 保证子任务在调用者所在
+        // context 执行。submit_to_scheduler 在 kLongRunMode=true 时会通过 dispatcher
+        // 将任务分发到其他 context，若那些 context 已停止则子任务永不被执行，导致
+        // latch 无法归零而永久挂起。缺点：长运行模式下失去跨 context 的负载均衡，
+        // 但 when_all 典型场景是 I/O 密集型（实质并行在内核而非用户态调度层），
+        // 因此单 context 顺序执行的影响可以接受。
+        submit_to_context(m_coro);
+        log::debug("when_all_task::start: submitted to scheduler");
     }
 
 private:
@@ -427,7 +453,9 @@ auto when_all_task_promise<return_type>::get_return_object() noexcept -> decltyp
 
 // template<> NOTE: 该全特化情况无需template
 auto when_all_task_promise<void>::get_return_object() noexcept -> decltype(auto)
-{ return when_all_task<void>{when_all_task_promise_base<void>::coroutine_handle_type::from_promise(*this)}; }
+{
+    return when_all_task<void>{when_all_task_promise_base<void>::coroutine_handle_type::from_promise(*this)};
+}
 } // namespace detail
 
 }; // namespace coro

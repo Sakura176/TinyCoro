@@ -4,6 +4,7 @@
 #include <cstdint>
 
 #include "coro/comp/event.hpp"
+#include "coro/log.hpp"
 
 namespace coro
 {
@@ -34,7 +35,10 @@ class latch
 {
 public:
     using event_t = event<>;
-    latch(std::uint64_t count) noexcept : m_count(count) {}
+    latch(std::uint64_t count) noexcept : m_count(count) 
+    {
+        log::debug("latch::latch: initial count={}", count);
+    }
     latch(const latch&)                    = delete;
     latch(latch&&)                         = delete;
     auto operator=(const latch&) -> latch& = delete;
@@ -44,15 +48,22 @@ public:
     auto count_down() noexcept -> void
     {
         // 计数减1并获取旧值，判断是否需要恢复
-        if (m_count.fetch_sub(1, std::memory_order_acq_rel) <= 1)
+        auto old_count = m_count.fetch_sub(1, std::memory_order_acq_rel);
+        log::debug("latch::count_down: old_count={}, new_count={}", old_count, old_count - 1);
+        if (old_count <= 1)
         {
             // resume所有awaiter
+            log::debug("latch::count_down: count reached zero, setting event");
             m_ev.set();
         }
     }
 
     // 计数器大于0则挂起
-    auto wait() noexcept -> event_t::awaiter { return m_ev.wait(); }
+    auto wait() noexcept -> event_t::awaiter 
+    { 
+        log::debug("latch::wait: current count={}", m_count.load());
+        return m_ev.wait(); 
+    }
 
 private:
     std::atomic<uint64_t> m_count;

@@ -6,6 +6,7 @@
 
 #include "config.h"
 #include "coro/engine.hpp"
+#include "coro/log.hpp"
 #include "coro/meta_info.hpp"
 #include "coro/task.hpp"
 
@@ -127,7 +128,15 @@ public:
     [[CORO_TEST_USED(lab2b)]] auto run(stop_token token) noexcept -> void;
 
     // TODO[lab2b]: Add more function if you need
-    auto empty_wait_task() noexcept -> bool { return m_register_count.load() == 0 && m_engine.empty_io(); }
+    auto empty_wait_task() noexcept -> bool 
+    { 
+        auto reg_count = m_register_count.load();
+        bool empty_io = m_engine.empty_io();
+        bool result = reg_count == 0 && empty_io;
+        log::debug("context::empty_wait_task: ctx_id={}, reg_count={}, empty_io={}, result={}", 
+                   m_id, reg_count, empty_io, result);
+        return result;
+    }
 
 private:
     CORO_ALIGN engine   m_engine;         // 协程调度引擎（内存对齐）
