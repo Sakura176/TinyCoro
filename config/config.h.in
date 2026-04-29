@@ -39,8 +39,8 @@ namespace coro::config
 // #define OFF 6
 
 // when LOGTOFILE is defined, the log will also be printed to logfile
-#define LOGTOFILE
-#define LOG_LEVEL debug
+// #define LOGTOFILE
+#define LOG_LEVEL info
 #define USEMUTEX
 
 // the log file stograge path, complete path is ${tinycoro_path}/kLogFileName

@@ -46,10 +46,10 @@ public:
         auto await_resume() noexcept -> void;
 
         // QUESTION: Why resume the coroutine need to be submitted to the context?
-        auto resume() noexcept -> void 
-        { 
+        virtual auto resume() noexcept -> void
+        {
             log::debug("mutex_awaiter::resume: ctx_id={}, coro={}", m_ctx.get_ctx_id(), reinterpret_cast<uintptr_t>(m_await_coro.address()));
-            m_ctx.submit_task(m_await_coro); 
+            m_ctx.submit_task(m_await_coro);
         }
 
         context&                m_ctx;
@@ -82,7 +82,7 @@ public:
 
     auto lock_guard() noexcept -> guard_awaiter;
 
-private:
+public:
     bool register_waiter(mutex_awaiter* waiter) noexcept;
 
 private:

@@ -20,7 +20,7 @@ namespace coro
 {
 /**
  * @brief Welcome to tinycoro lab5b, in this part you will build the basic coroutine
- * synchronization component——condition_variable by modifing condition_variable.hpp
+ * synchronization component -- condition_variable by modifying condition_variable.hpp
  * and condition_variable.cpp. Please ensure you have read the document of lab5b.
  *
  * @warning You should carefully consider whether each implementation should be thread-safe.
@@ -39,15 +39,20 @@ using cond_type = std::function<bool()>;
 class condition_variable;
 using cond_var = condition_variable;
 
-// TODO[lab5b]: This condition_variable is an example to make complie success,
-// You should delete it and add your implementation, I don't care what you do,
-// but keep the member function and construct function's declaration same with example.
 /**
- * TODO: 目标：实现一个基于协程的条件变量，支持wait和notify操作，功能类似std::condition_variable
- * 下述问题需要弄清楚，不可仅完成代码了事：
- *     1.依赖什么手段来判断条件是否完成？轮询会占用CPU资源，此处应该是使用io_uring
- *          理解错误，应该由notify来唤醒
- *     3.理清条件变量的执行过程，思路确定后再清醒代码编写
+ * NOTE: condition_variable implementation key points
+ *   1. cv_awaiter extends mutex_awaiter, reusing the mutex waiter queue mechanism
+ *   2. resume() is virtual (declared in mutex_awaiter), ensuring correct dispatch
+ *      when mutex::unlock() transfers the lock to a CV waiter
+ *   3. m_mutex_acquired flag distinguishes two resume() call sources:
+ *      - called from notify_one/notify_all  -> need to acquire mutex first
+ *      - called from mutex::unlock() transfer -> already hold mutex, resume directly
+ *   4. register_lock() releases the mutex; resume() re-acquires it,
+ *      guaranteeing the mutex is held when wait() returns
+ *   5. The CV waiter linked list (m_head/m_tail) is protected by m_lock;
+ *      notify_all detaches the list under lock before iterating
+ *   6. Predicate is re-checked in resume(); unsatisfied waiters rejoin the CV queue
+ *      (this handles spurious wakeups from notify_all)
  */
 
 /**
@@ -95,6 +100,11 @@ public:
     private:
         cond_type m_cond;
         cond_var& m_cv;
+        // NOTE: true => next resume() is from mutex::unlock() lock transfer,
+        // skip try_lock and directly resume the coroutine
+        bool      m_mutex_acquired{false};
+        // NOTE: tracks whether a wait has been registered on context,
+        // used by await_resume to correctly unregister
         bool      m_suspend_state;
     };
 
