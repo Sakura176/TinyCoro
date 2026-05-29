@@ -25,7 +25,7 @@ namespace coro
 {
 /**
  * @brief Welcome to tinycoro lab5c, in this part you will build the basic coroutine
- * synchronization component����channel by modifing channel.hpp and channel.cpp.
+ * synchronization component����channel by modifing channel.hpp and channel.cpp.
  * Please ensure you have read the document of lab5c.
  *
  * @warning You should carefully consider whether each implementation should be thread-safe.
@@ -51,17 +51,62 @@ class channel
 {
     using data_type = std::optional<T>;
 
+    mutex                   m_mtx;
+    condition_variable      m_send_cv;
+    condition_variable      m_recv_cv;
+    std::array<T, capacity> m_buffer;
+    size_t                  m_head{0};
+    size_t                  m_tail{0};
+    size_t                  m_count{0};
+    bool                    m_closed{false};
+
 public:
     template<typename value_type>
         requires(std::is_constructible_v<T, value_type &&>)
     auto send(value_type&& value) noexcept -> task<bool>
     {
-        co_return {};
+        auto guard = co_await m_mtx.lock_guard();
+        while (m_count >= capacity && !m_closed)
+        {
+            co_await m_send_cv.wait(m_mtx);
+        }
+        if (m_closed)
+        {
+            m_send_cv.notify_all();
+            co_return false;
+        }
+        m_buffer[m_tail] = std::move(value);
+        m_tail           = (m_tail + 1) % capacity;
+        m_count++;
+        m_recv_cv.notify_one();
+        co_return true;
     }
 
-    auto recv() noexcept -> task<data_type> { co_return {}; }
+    auto recv() noexcept -> task<data_type>
+    {
+        auto guard = co_await m_mtx.lock_guard();
+        while (m_count == 0 && !m_closed)
+            co_await m_recv_cv.wait(m_mtx);
+        if (m_count == 0 && m_closed)
+        {
+            m_recv_cv.notify_all();
+            co_return std::nullopt;
+        }
+        auto val = std::move(m_buffer[m_head]);
+        m_head   = (m_head + 1) % capacity;
+        m_count--;
+        m_send_cv.notify_one();
+        co_return std::optional<T>(std::move(val));
+    }
 
-    auto close() noexcept -> void {}
+    auto close() noexcept -> void
+    {
+        // 协作式调度器中，m_closed 赋值在两次 co_await 之间执行
+        // 不存在并发打断，无需持锁
+        m_closed = true;
+        m_send_cv.notify_all();
+        m_recv_cv.notify_all();
+    }
 };
 
 }; // namespace coro

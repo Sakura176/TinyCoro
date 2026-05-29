@@ -30,7 +30,11 @@
   - [04-04-系统设计类问题.md](04-04-系统设计类问题.md) - 基于 TinyCoro 的系统设计
   - [04-05-故障排除类问题.md](04-05-故障排除类问题.md) - 调试、测试、故障排除
 
-### 5. 学习建议和总结
+### 5. Lab 实现指引
+- [when_all_code_analysis.md](when_all_code_analysis.md) - lab5a `when_all` 实现分析
+- [lab5c_channel_implementation_guide.md](lab5c_channel_implementation_guide.md) - lab5c `channel` 实现指引
+
+### 6. 学习建议和总结
 - **文件**: [05-学习建议和总结.md](05-学习建议和总结.md)
 - **内容**: 学习路径建议、推荐资源、面试准备清单、项目总结
 
